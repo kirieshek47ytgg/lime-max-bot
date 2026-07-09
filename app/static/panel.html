@@ -1,0 +1,5050 @@
+<!doctype html>
+<!--
+  ============================================================================
+  Админ-панель бота уведомлений о бронировании — единый автономный файл (HTML + CSS + JS).
+
+  Назначение
+    Веб-кабинет оператора/владельца базы отдыха: бот уведомляет гостей в MAX о
+    бронированиях из Restoplace (подтверждение/изменение/отмена). В панели —
+    переписка, брони, шаблоны уведомлений, аналитика и управление. Бэкенд отдаёт
+    этот файл и обслуживает REST API под /api/* (диалоги, заказы, аналитика,
+    авторизация).
+
+  Структура файла
+    head → style   — все стили. Оформление построено на CSS-переменных в :root
+                      и html[data-theme=dark] (см. блок «Дизайн-система» ниже):
+                      тема (светлая/тёмная), цветовая гамма (--primary и
+                      производные), статусные цвета. Менять цвета — только там.
+    body           — разметка экранов: #login и #app с вкладками-вью
+                      (#vChats, #vOrders, #vBot, #vStats, #vAdmin).
+    inline-скрипт   — в head: ранний guard, ставит тёмную тему до отрисовки.
+    основной скрипт — в body: вся логика — оформление, опрос API, рендер, действия.
+
+  Соглашения
+    • Никаких сборок и зависимостей — чистый ES, запускается как статика.
+    • Данные тянутся коротким поллингом (tick) и перерисовываются по «сигнатуре»,
+      чтобы не моргать при отсутствии изменений.
+    • Цвета берутся из CSS-переменных; хардкод цвета допустим лишь для
+      семантики (успех/ошибка) и данных гамм (объект ACCENTS).
+  ============================================================================
+-->
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Админ-панель</title>
+    <link
+      id="favicon"
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%92%AC%3C/text%3E%3C/svg%3E"
+    />
+    <script>
+      try {
+        if (localStorage.getItem("theme") === "dark")
+          document.documentElement.setAttribute("data-theme", "dark");
+      } catch (e) {}
+    </script>
+    <style>
+      /* =========================================================================
+         ДИЗАЙН-СИСТЕМА (CSS-переменные)
+
+         Всё оформление управляется переменными. Компоненты ссылаются на них и
+         сами адаптируются под тему и гамму — поэтому правьте цвета здесь, а не в
+         отдельных правилах.
+
+           :root                  — светлая тема (значения по умолчанию).
+           html[data-theme=dark]  — тёмная тема (графит), переопределяет нужное.
+
+         Ключевые группы:
+           --primary / --primary-d / --primary-soft / --primary-bd  — акцент гаммы
+               (живьём подменяются из JS applyAccent при выборе цвета/темы).
+           --bg / --panel / --line / --text / --muted               — поверхности.
+           --nav-*                                                  — шапка.
+           --green / --danger / --warn / --botc                     — семантика
+               (успех / ошибка-отмена / ожидание / «ведёт бот») — НЕ из темы.
+           --sh* , --r*                                             — тени и радиусы.
+         ========================================================================= */
+      :root {
+        --primary: #d6336c;
+        --primary-d: #b02a57;
+        --primary-soft: #fbe8ef;
+        /* Контур/обводка в тон акцента — выводится из --primary, поэтому меняется вместе с гаммой и темой */
+        --primary-bd: color-mix(in srgb, var(--primary) 32%, var(--panel));
+        --green: #2e9e5b;
+        --green-soft: #e5f3eb;
+        /* Цвет элементов «бот ведёт диалог» (нейтральный антрацит) — отдельно от зелёного успеха */
+        --botc: #4b5563;
+        /* Спокойный красный (ошибка/отмена) — мягче кричащего #E03131, с тёмным вариантом ниже */
+        --danger: #cf4b4b;
+        /* Янтарный «ожидание/ждёт оплаты» — независим от темы, не сливается ни с зелёным, ни с красным */
+        --warn: #d9870b;
+        --bg: #e6e9f1;
+        --panel: #fafbfd;
+        --line: #cfd5e1;
+        --line-2: #b7bfce;
+        --text: #232739;
+        --muted: #7c8499;
+        --client: #eef1f6;
+        --bot: #fce8ef;
+        --manager: #d6336c;
+        --ink: #272c3d;
+        /* единая система теней — мягкие, в одной гамме */
+        --sh-sm: 0 1px 2px rgba(28, 33, 54, 0.05), 0 1px 3px rgba(28, 33, 54, 0.05);
+        --sh: 0 4px 14px rgba(28, 33, 54, 0.07);
+        --sh-md: 0 10px 28px rgba(28, 33, 54, 0.12);
+        --sh-primary: 0 6px 18px rgba(214, 51, 108, 0.28);
+        --r: 14px;
+        --r-sm: 10px;
+        --chat-bg: #eff1f7;
+        --hover: #eff1f6;
+        --chip: #e2e6ef;
+        --unread: #fbf0f4;
+        --disabled: #e9ecf2;
+        /* Шапка: в светлой теме — светлая, в тёмной — графит (переопределяется ниже) */
+        --nav-1: #f8fafc;
+        --nav-2: #ebeef4;
+        --nav-fg: #2a2d3a;
+        --nav-dim: #737a8c;
+        --nav-hover: rgba(0, 0, 0, 0.06);
+        --nav-border: var(--line);
+        --nav-sh: 0 3px 14px rgba(28, 33, 54, 0.18);
+      }
+      /* Тёмная тема: переопределяем переменные — большинство элементов используют их и адаптируются сами */
+      html[data-theme="dark"] {
+        --primary: #ea6e97;
+        --primary-d: #d6336c;
+        --primary-soft: rgba(234, 110, 151, 0.16);
+        --green: #3fbe73;
+        --green-soft: #1e3a2a;
+        --botc: #9ca3af;
+        --danger: #e07b7b;
+        --warn: #e8a33c;
+        /* Нейтральный графит/чёрный (без синего оттенка) */
+        --bg: #121212;
+        --panel: #1c1c1c;
+        --line: #242424;
+        --line-2: #2e2e2e;
+        --text: #e8e8e8;
+        --muted: #9a9a9a;
+        --client: #262626;
+        --bot: #3a2330;
+        --manager: #d6336c;
+        --ink: #e8e8e8;
+        --sh-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+        --sh: 0 4px 14px rgba(0, 0, 0, 0.45);
+        --sh-md: 0 10px 28px rgba(0, 0, 0, 0.6);
+        --sh-primary: 0 6px 18px rgba(214, 51, 108, 0.45);
+        --chat-bg: #121212;
+        --hover: #242424;
+        --chip: #2a2a2a;
+        --unread: rgba(234, 110, 151, 0.13);
+        --disabled: #222222;
+        --nav-1: #1e1e1e;
+        --nav-2: #161616;
+        --nav-fg: #ffffff;
+        --nav-dim: #aab2c5;
+        --nav-hover: rgba(255, 255, 255, 0.08);
+        --nav-border: transparent;
+        --nav-sh: 0 2px 12px rgba(0, 0, 0, 0.45);
+      }
+      html[data-theme="dark"] input,
+      html[data-theme="dark"] textarea,
+      html[data-theme="dark"] select {
+        color: var(--text);
+      }
+      html[data-theme="dark"] .bub .filecard {
+        background: rgba(255, 255, 255, 0.07);
+      }
+      html[data-theme="dark"] #login {
+        background: linear-gradient(135deg, #1a1a1a, #121212);
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family: "Segoe UI", system-ui, Arial, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+      /* Полосы прокрутки скрыты полностью (скролл колёсиком/тачпадом работает). Разделители — border. */
+      * {
+        scrollbar-width: none;
+        -ms-overflow-style: none;
+      }
+      *::-webkit-scrollbar {
+        width: 0;
+        height: 0;
+        display: none;
+      }
+      /* Login */
+      #login {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: linear-gradient(135deg, #fce4ec, #edeff2);
+      }
+      .card {
+        background: var(--panel);
+        padding: 34px 30px;
+        border-radius: 20px;
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.12);
+        width: 340px;
+      }
+      .card h1 {
+        margin: 0 0 4px;
+        color: var(--primary);
+        font-size: 24px;
+      }
+      .card p {
+        margin: 0 0 22px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .card input {
+        width: 100%;
+        padding: 13px 14px;
+        margin-bottom: 12px;
+        border: 1px solid var(--line-2);
+        border-radius: 12px;
+        font-size: 14px;
+        outline: none;
+        background: var(--bg);
+        color: var(--text);
+        transition:
+          border-color 0.15s,
+          box-shadow 0.15s;
+      }
+      .card input:focus {
+        border-color: var(--primary);
+        box-shadow: 0 0 0 3px var(--primary-soft);
+      }
+      .card button {
+        width: 100%;
+        padding: 13px;
+        border: 0;
+        border-radius: 12px;
+        background: var(--primary);
+        color: #fff;
+        font-size: 15px;
+        font-weight: 600;
+        cursor: pointer;
+        box-shadow: var(--sh-primary);
+        transition:
+          background 0.15s,
+          transform 0.15s;
+      }
+      .card button:hover {
+        background: var(--primary-d);
+        transform: translateY(-1px);
+      }
+      .err {
+        color: var(--primary);
+        font-size: 13px;
+        min-height: 18px;
+        margin-bottom: 8px;
+      }
+      /* App shell */
+      #app {
+        display: none;
+        flex-direction: column;
+        height: 100vh;
+      }
+      .nav {
+        height: 54px;
+        background: linear-gradient(180deg, var(--nav-1), var(--nav-2));
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 0 16px;
+        color: var(--nav-fg);
+        flex-shrink: 0;
+        box-shadow: var(--nav-sh);
+        border-bottom: 1px solid var(--nav-border);
+        z-index: 4;
+      }
+      .nav b {
+        color: var(--nav-fg);
+        font-size: 17px;
+        margin-right: 14px;
+      }
+      .tab {
+        background: none;
+        border: 0;
+        color: var(--nav-dim);
+        font-size: 14px;
+        padding: 8px 14px;
+        border-radius: var(--r-sm);
+        cursor: pointer;
+      }
+      .tab:hover {
+        color: var(--nav-fg);
+        background: var(--nav-hover);
+      }
+      .tab.on {
+        background: var(--primary);
+        color: #fff;
+        box-shadow: var(--sh-primary);
+      }
+      .tab.on:hover {
+        background: var(--primary);
+        color: #fff;
+      }
+      .nav .sp {
+        flex: 1;
+      }
+      .nav .who {
+        font-size: 12px;
+        color: var(--nav-dim);
+        margin-right: 12px;
+      }
+      .nav .out {
+        background: none;
+        border: 1px solid var(--line-2);
+        color: var(--nav-dim);
+        border-radius: 8px;
+        padding: 5px 10px;
+        cursor: pointer;
+        font-size: 12px;
+      }
+      .nav .out:hover {
+        color: var(--nav-fg);
+        border-color: var(--primary);
+      }
+      /* Кнопка-шестерёнка настроек в навбаре */
+      .gear {
+        margin-right: 12px;
+        width: 34px;
+        height: 34px;
+        min-width: 34px;
+        padding: 0;
+        border: 1px solid var(--line-2);
+        background: var(--nav-hover);
+        color: var(--nav-fg);
+        border-radius: 50%;
+        cursor: pointer;
+        font-size: 16px;
+        line-height: 1;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        transition:
+          transform 0.25s ease,
+          background 0.15s,
+          border-color 0.15s;
+      }
+      .gear:hover {
+        background: var(--primary-soft);
+        border-color: var(--primary);
+        color: var(--primary);
+        transform: rotate(60deg);
+      }
+      /* Панель настроек */
+      .setgrp {
+        margin-bottom: 20px;
+      }
+      .setgrp > label {
+        display: block;
+        font-size: 12px;
+        color: var(--muted);
+        margin: 0 0 8px;
+        font-weight: 600;
+      }
+      /* Переключатель тема светлая/тёмная */
+      .segbtns {
+        display: flex;
+        gap: 8px;
+      }
+      .segbtn {
+        flex: 1;
+        padding: 10px;
+        border: 1px solid var(--line-2);
+        background: var(--panel);
+        color: var(--text);
+        border-radius: var(--r-sm);
+        cursor: pointer;
+        font-size: 13px;
+        font-weight: 600;
+        box-shadow: var(--sh-sm);
+        transition: 0.15s;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+      }
+      .segbtn:hover {
+        border-color: var(--primary);
+        color: var(--primary);
+      }
+      .segbtn.on {
+        background: var(--primary);
+        color: #fff;
+        border-color: var(--primary);
+        box-shadow: var(--sh-primary);
+      }
+      /* Сетка выбора иконки */
+      .icogrid {
+        display: grid;
+        grid-template-columns: repeat(8, 1fr);
+        gap: 6px;
+      }
+      .icoopt {
+        aspect-ratio: 1;
+        border: 1px solid var(--line-2);
+        background: var(--panel);
+        border-radius: var(--r-sm);
+        cursor: pointer;
+        font-size: 18px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: 0.15s;
+        padding: 0;
+      }
+      .icoopt:hover {
+        border-color: var(--primary);
+        background: var(--primary-soft);
+        transform: translateY(-1px);
+      }
+      .icoopt.on {
+        border-color: var(--primary);
+        background: var(--primary-soft);
+        box-shadow: 0 0 0 2px var(--primary-soft);
+      }
+      .icoopt:disabled {
+        opacity: 0.5;
+        cursor: default;
+        pointer-events: none;
+      }
+      /* Свотчи цветовых гамм */
+      .swgrid {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 10px;
+      }
+      .swatch {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 6px;
+        border: 1px solid var(--line-2);
+        background: var(--panel);
+        border-radius: var(--r-sm);
+        padding: 10px 6px;
+        cursor: pointer;
+        transition: 0.15s;
+        box-shadow: var(--sh-sm);
+      }
+      .swatch:hover {
+        border-color: var(--swc);
+        transform: translateY(-2px);
+        box-shadow: var(--sh);
+      }
+      .swatch.on {
+        border-color: var(--swc);
+        box-shadow: 0 0 0 2px var(--swc);
+      }
+      .swatch.dis {
+        opacity: 0.5;
+        cursor: default;
+        pointer-events: none;
+      }
+      .swatch.dis:hover {
+        transform: none;
+        box-shadow: var(--sh-sm);
+        border-color: var(--line-2);
+      }
+      .swatch .dotc {
+        width: 26px;
+        height: 26px;
+        border-radius: 50%;
+        background: var(--swc);
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.18);
+      }
+      .swatch .swn {
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .swatch.on .swn {
+        color: var(--text);
+        font-weight: 600;
+      }
+      .viewport {
+        flex: 1;
+        min-height: 0;
+      }
+      /* Chats view */
+      #vChats {
+        display: grid;
+        grid-template-columns: 430px 1fr;
+        height: 100%;
+      }
+      .side {
+        background: var(--panel);
+        border-right: 1px solid var(--line);
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+      }
+      .list {
+        overflow-y: auto;
+        flex: 1;
+      }
+      .conv {
+        padding: 12px 16px;
+        border-bottom: 1px solid var(--line);
+        cursor: pointer;
+        display: flex;
+        gap: 10px;
+        align-items: flex-start;
+      }
+      .conv:hover {
+        background: var(--hover);
+      }
+      .conv.sel {
+        background: var(--primary-soft);
+      }
+      .dot {
+        font-size: 10px;
+        margin-top: 5px;
+      }
+      .conv .nm {
+        font-weight: 600;
+        font-size: 14px;
+        line-height: 1.3;
+        display: flex;
+        align-items: baseline;
+        gap: 6px;
+        min-width: 0;
+      }
+      .conv .nm .nm-name {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .conv .pv {
+        font-size: 12px;
+        color: var(--muted);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 230px;
+      }
+      .main {
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+      }
+      .head {
+        height: 60px;
+        border-bottom: 1px solid var(--line);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 22px;
+        background: var(--panel);
+      }
+      .head .title {
+        font-weight: 600;
+        font-size: 16px;
+      }
+      .chat {
+        flex: 1;
+        overflow-y: auto;
+        padding: 18px;
+        background: var(--chat-bg);
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .row {
+        display: flex;
+      }
+      .row.c {
+        justify-content: flex-start;
+      }
+      .row.b,
+      .row.m {
+        justify-content: flex-end;
+      }
+      .daysep {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin: 6px 0;
+      }
+      .daysep span {
+        background: var(--chip);
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 600;
+        padding: 3px 12px;
+        border-radius: 12px;
+      }
+      .bub {
+        max-width: 48%;
+        padding: 9px 13px;
+        border-radius: 14px;
+        font-size: 14px;
+        white-space: pre-wrap;
+        word-break: break-word;
+        box-shadow: var(--sh-sm);
+      }
+      .row.c .bub {
+        border: 1px solid var(--line);
+      }
+      .bub .meta {
+        font-size: 10px;
+        color: var(--muted);
+        margin-bottom: 3px;
+      }
+      .bub .imgs {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        margin: 2px 0;
+      }
+      .bub .imgs img {
+        width: 150px;
+        max-width: 100%;
+        height: 110px;
+        object-fit: cover;
+        border-radius: 10px;
+        cursor: pointer;
+        display: block;
+      }
+      .bub .videos {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        margin: 2px 0;
+      }
+      /* Видео-сообщение: кастомный плеер в стиле админки (та же логика, что у .voice) */
+      .bub .vid {
+        position: relative;
+        width: 260px;
+        max-width: 100%;
+        border-radius: 10px;
+        overflow: hidden;
+        background: #000;
+        cursor: pointer;
+      }
+      .bub .vid video {
+        display: block;
+        width: 100%;
+        max-height: 320px;
+        object-fit: contain;
+        background: #000;
+      }
+      .bub .vid-big {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        width: 52px;
+        height: 52px;
+        border: 0;
+        border-radius: 50%;
+        cursor: pointer;
+        background: rgba(0, 0, 0, 0.55);
+        color: #fff;
+        font-size: 20px;
+        line-height: 1;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0 0 0 3px;
+        transition:
+          opacity 0.15s ease,
+          background 0.15s ease;
+      }
+      .bub .vid-big:hover {
+        background: rgba(0, 0, 0, 0.72);
+      }
+      .bub .vid.playing .vid-big {
+        opacity: 0;
+        pointer-events: none;
+      }
+      .bub .vid-bar-wrap {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        padding: 14px 8px 6px;
+        background: linear-gradient(0deg, rgba(0, 0, 0, 0.68), transparent);
+      }
+      .bub .vid-bar {
+        flex: 1;
+        min-width: 0;
+        height: 16px;
+        cursor: pointer;
+        position: relative;
+        display: flex;
+        align-items: center;
+        touch-action: none;
+      }
+      .bub .vid-bar::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 50%;
+        transform: translateY(-50%);
+        height: 4px;
+        border-radius: 3px;
+        background: rgba(255, 255, 255, 0.32);
+      }
+      .bub .vid-fill {
+        position: absolute;
+        left: 0;
+        top: 50%;
+        transform: translateY(-50%);
+        height: 4px;
+        width: 0;
+        border-radius: 3px;
+        background: #fff;
+        pointer-events: none;
+      }
+      .bub .vid-time {
+        flex-shrink: 0;
+        font-size: 11px;
+        color: #fff;
+        min-width: 30px;
+        text-align: right;
+      }
+      .bub .vid-mute,
+      .bub .vid-full {
+        flex-shrink: 0;
+        border: 0;
+        background: transparent;
+        color: #fff;
+        cursor: pointer;
+        font-size: 13px;
+        padding: 0 2px;
+        line-height: 1;
+        opacity: 0.9;
+      }
+      .bub .vid-mute:hover,
+      .bub .vid-full:hover {
+        opacity: 1;
+      }
+      /* Карточка файла (pdf/excel/…): обложка-иконка + имя, клик открывает файл */
+      .bub .filecard {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 3px 0;
+        padding: 8px 10px;
+        background: rgba(0, 0, 0, 0.05);
+        border-radius: 10px;
+        cursor: pointer;
+        max-width: 240px;
+      }
+      .row.m .filecard {
+        background: rgba(255, 255, 255, 0.18);
+      }
+      .bub .filecard .fc-ico {
+        font-size: 22px;
+        flex-shrink: 0;
+      }
+      .bub .filecard .fc-name {
+        flex: 1;
+        min-width: 0;
+        font-size: 13px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .bub .filecard .fc-open {
+        opacity: 0.6;
+        font-size: 13px;
+      }
+      /* Голосовое сообщение: кастомный плеер в стиле админки (как в Telegram) */
+      /* white-space:normal — гасим inherited pre-wrap, иначе переносы в разметке станут лишними флекс-элементами */
+      .bub .voice {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin: 6px 0 3px;
+        min-width: 230px;
+        white-space: normal;
+      }
+      .bub .voice audio {
+        display: none;
+      }
+      .bub .v-play {
+        flex-shrink: 0;
+        width: 34px;
+        height: 34px;
+        border: 0;
+        border-radius: 50%;
+        cursor: pointer;
+        background: var(--primary);
+        color: #fff;
+        font-size: 13px;
+        line-height: 1;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+        box-shadow: var(--sh-sm);
+      }
+      .bub .v-play:hover {
+        background: var(--primary-d);
+      }
+      /* полоса прогресса — широкая зона клика (для перемотки), тонкий трек по центру кнопки play */
+      .bub .v-bar {
+        flex: 1;
+        min-width: 0;
+        height: 20px;
+        cursor: pointer;
+        position: relative;
+        display: flex;
+        align-items: center;
+        touch-action: none;
+      }
+      .bub .v-bar::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 50%;
+        transform: translateY(-50%);
+        height: 4px;
+        border-radius: 3px;
+        background: var(--line-2);
+      }
+      .bub .v-fill {
+        position: absolute;
+        left: 0;
+        top: 50%;
+        transform: translateY(-50%);
+        height: 4px;
+        width: 0;
+        border-radius: 3px;
+        background: var(--primary);
+        pointer-events: none;
+      }
+      .bub .v-time {
+        flex-shrink: 0;
+        font-size: 11px;
+        color: var(--muted);
+        min-width: 30px;
+        text-align: right;
+      }
+      .bub .v-speed {
+        flex-shrink: 0;
+        border: 1px solid var(--line-2);
+        background: var(--panel);
+        color: var(--muted);
+        border-radius: 11px;
+        height: 22px;
+        min-width: 34px;
+        padding: 0 7px;
+        font-size: 11px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .bub .v-speed:hover {
+        border-color: var(--primary);
+        color: var(--primary);
+      }
+      /* На розовом пузыре менеджера — контрастные элементы плеера */
+      .row.m .v-play {
+        background: #fff;
+        color: var(--primary);
+      }
+      .row.m .v-bar::before {
+        background: rgba(255, 255, 255, 0.3);
+      }
+      .row.m .v-fill {
+        background: #fff;
+      }
+      .row.m .v-time {
+        color: rgba(255, 255, 255, 0.78);
+      }
+      .row.m .v-speed {
+        background: rgba(255, 255, 255, 0.15);
+        border-color: rgba(255, 255, 255, 0.4);
+        color: #fff;
+      }
+      /* Расшифровка голосового под плеером */
+      .bub .transcript {
+        margin-top: 5px;
+        font-size: 13.5px;
+        line-height: 1.4;
+        opacity: 0.92;
+      }
+      /* Реакции-эмодзи под пузырём */
+      .bub .reacts {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        margin-top: 5px;
+      }
+      .bub .react {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 11px;
+        padding: 0 7px;
+        font-size: 13px;
+        line-height: 20px;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+      }
+      .row.m .react {
+        color: var(--text);
+      }
+      #lightbox {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.85);
+        display: none;
+        align-items: center;
+        justify-content: center;
+        z-index: 20;
+        cursor: zoom-out;
+      }
+      #lightbox img,
+      #lightbox video {
+        max-width: 92vw;
+        max-height: 92vh;
+        border-radius: 8px;
+      }
+      #lightbox video {
+        cursor: default; /* сам #lightbox — zoom-out (клик = закрыть), но по видео клик не закрывает */
+      }
+      .row.c .bub {
+        background: var(--client);
+      }
+      .row.b .bub {
+        background: var(--bot);
+      }
+      .row.m .bub {
+        background: var(--primary);
+        color: #fff;
+      }
+      .row.m .meta {
+        color: rgba(255, 255, 255, 0.78);
+      }
+      .bar {
+        border-top: 1px solid var(--line);
+        background: var(--panel);
+        padding: 12px;
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+      .bar button:not(.tplbtn) {
+        height: 40px;
+        padding: 0 16px;
+        border: 0;
+        border-radius: 20px;
+        color: #fff;
+        font-weight: 600;
+        cursor: pointer;
+        box-shadow: var(--sh-sm);
+      }
+      .bar button:not(.tplbtn):not(:disabled):hover {
+        transform: translateY(-1px);
+        box-shadow: var(--sh);
+      }
+      .b-enter {
+        background: var(--primary);
+      }
+      .b-leave {
+        background: var(--botc);
+      }
+      .b-send {
+        background: var(--primary);
+      }
+      .bar input {
+        flex: 1;
+        height: 40px;
+        border: 1px solid var(--line-2);
+        border-radius: 20px;
+        padding: 0 16px;
+        font-size: 14px;
+        outline: none;
+        background: var(--panel);
+        color: var(--text);
+        transition:
+          border-color 0.15s,
+          box-shadow 0.15s;
+      }
+      .bar input:focus {
+        border-color: var(--primary);
+        box-shadow: 0 0 0 3px var(--primary-soft);
+      }
+      /* Поле сообщения — многострочное, с переносом по Shift+Enter (как в Telegram). Растёт под текст до предела, затем скролл. */
+      .bar textarea {
+        flex: 1;
+        min-height: 40px;
+        max-height: 140px;
+        border: 1px solid var(--line-2);
+        border-radius: 20px;
+        padding: 9px 16px;
+        font-size: 14px;
+        line-height: 20px;
+        font-family: inherit;
+        outline: none;
+        background: var(--panel);
+        color: var(--text);
+        resize: none;
+        overflow-y: auto;
+        transition:
+          border-color 0.15s,
+          box-shadow 0.15s;
+      }
+      .bar textarea:focus {
+        border-color: var(--primary);
+        box-shadow: 0 0 0 3px var(--primary-soft);
+      }
+      button:disabled {
+        opacity: 0.45;
+        cursor: default;
+      }
+      /* Карточка-блок (используется в заказах, шаблонах, аналитике, управлении) */
+      .kbcard {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: var(--r);
+        padding: 15px 17px;
+        margin-bottom: 12px;
+        box-shadow: var(--sh-sm);
+      }
+      .kbcard .t {
+        font-weight: 600;
+        font-size: 15px;
+      }
+      .kbcard .s {
+        font-size: 13px;
+        color: var(--muted);
+        margin-top: 3px;
+      }
+      .kbcard .tag {
+        font-size: 11px;
+        color: var(--primary);
+        background: var(--primary-soft);
+        padding: 2px 8px;
+        border-radius: 8px;
+        margin-left: 6px;
+      }
+      .kbcard .acts {
+        margin-top: 8px;
+        display: flex;
+        gap: 8px;
+      }
+      .mini {
+        border: 1px solid var(--line-2);
+        background: var(--panel);
+        border-radius: var(--r-sm);
+        padding: 6px 13px;
+        cursor: pointer;
+        font-size: 13px;
+        color: var(--text);
+        box-shadow: var(--sh-sm);
+      }
+      .mini:hover {
+        border-color: var(--primary);
+        color: var(--primary);
+        box-shadow: var(--sh);
+        transform: translateY(-1px);
+      }
+      .mini.d {
+        color: var(--primary);
+        border-color: var(--primary-bd);
+      }
+      .mini.d:hover {
+        background: var(--primary);
+        color: #fff;
+        border-color: var(--primary);
+      }
+      .add {
+        background: var(--primary);
+        color: #fff;
+        border: 0;
+        border-radius: var(--r-sm);
+        padding: 9px 16px;
+        cursor: pointer;
+        font-weight: 600;
+        box-shadow: var(--sh-primary);
+      }
+      .add:hover {
+        background: var(--primary-d);
+        transform: translateY(-1px);
+      }
+      .filebtn {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        border: 1.5px dashed var(--primary);
+        color: var(--primary);
+        background: var(--primary-soft);
+        border-radius: 11px;
+        padding: 9px 15px;
+        cursor: pointer;
+        font-size: 13px;
+        font-weight: 600;
+        transition: 0.15s;
+        white-space: nowrap;
+      }
+      .filebtn:hover {
+        background: var(--primary);
+        color: #fff;
+        border-style: solid;
+        box-shadow: 0 4px 14px color-mix(in srgb, var(--primary) 30%, transparent);
+      }
+      .fname {
+        font-size: 12px;
+        color: var(--muted);
+        max-width: 150px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      textarea,
+      .fld {
+        width: 100%;
+        border: 1px solid var(--line-2);
+        border-radius: var(--r-sm);
+        padding: 10px 12px;
+        font-size: 14px;
+        font-family: inherit;
+        outline: none;
+        background: var(--panel);
+        transition:
+          border-color 0.15s,
+          box-shadow 0.15s;
+      }
+      /* Единый отступ между чекбоксом/радио и подписью — одинаково на всех вкладках,
+         чтобы текст не «прилипал» к галочке и помощь под ним ровно выравнивалась (~26px). */
+      input[type="checkbox"],
+      input[type="radio"] {
+        margin: 0 8px 0 0;
+        flex: none;
+        vertical-align: middle;
+      }
+      /* Браузерное автозаполнение/подсказка не должны красить поле в белый — держим цвет темы */
+      input:-webkit-autofill,
+      input:-webkit-autofill:hover,
+      input:-webkit-autofill:focus,
+      input:-webkit-autofill:active,
+      textarea:-webkit-autofill,
+      select:-webkit-autofill,
+      input:autofill,
+      textarea:autofill {
+        -webkit-text-fill-color: var(--text) !important;
+        caret-color: var(--text);
+        -webkit-box-shadow: 0 0 0 1000px var(--panel) inset !important;
+        box-shadow: 0 0 0 1000px var(--panel) inset !important;
+      }
+      /* Поля поиска и входа имеют фон --bg — у них тень автозаполнения тоже --bg */
+      .srch input:-webkit-autofill,
+      .card input:-webkit-autofill,
+      .srch input:autofill,
+      .card input:autofill {
+        -webkit-box-shadow: 0 0 0 1000px var(--bg) inset !important;
+        box-shadow: 0 0 0 1000px var(--bg) inset !important;
+      }
+      /* Поле само растёт в высоту под объём текста (JS autoGrow), без внутреннего скролла.
+     min-height — удобный «пол», чтобы пустые поля не схлопывались в одну строку. */
+      textarea {
+        resize: none;
+        overflow-y: hidden;
+        box-sizing: border-box;
+        min-height: 44px;
+      }
+      #tplBody {
+        min-height: 200px;
+      }
+      textarea:focus,
+      .fld:focus {
+        border-color: var(--primary);
+        box-shadow: 0 0 0 3px var(--primary-soft);
+      }
+      .saved {
+        color: var(--primary);
+        font-size: 13px;
+        margin-left: 10px;
+      }
+      .off {
+        opacity: 0.5;
+      }
+      /* Modal */
+      #modal {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.4);
+        display: none;
+        align-items: center;
+        justify-content: center;
+        z-index: 10;
+      }
+      .mbox {
+        background: var(--panel);
+        border-radius: 18px;
+        padding: 24px;
+        width: 460px;
+        max-width: 92vw;
+        max-height: 90vh;
+        overflow-y: auto;
+        box-shadow: var(--sh-md);
+      }
+      .mbox textarea {
+        resize: none;
+      }
+      .mbox h3 {
+        margin: 0 0 14px;
+      }
+      .mbox label {
+        display: block;
+        font-size: 12px;
+        color: var(--muted);
+        margin: 10px 0 4px;
+      }
+      .mbox .mrow {
+        display: flex;
+        gap: 14px;
+        justify-content: flex-end;
+        margin-top: 18px;
+      }
+      .status {
+        position: fixed;
+        bottom: 8px;
+        left: 8px;
+        font-size: 11px;
+        color: var(--muted);
+      }
+      /* Поиск + фильтры */
+      .srch {
+        padding: 10px;
+        border-bottom: 1px solid var(--line);
+      }
+      .srch input {
+        width: 100%;
+        height: 36px;
+        border: 1px solid var(--line-2);
+        border-radius: 18px;
+        padding: 0 14px;
+        font-size: 13px;
+        outline: none;
+        background: var(--bg);
+        color: var(--text);
+        transition:
+          border-color 0.15s,
+          box-shadow 0.15s;
+      }
+      .srch input:focus {
+        border-color: var(--primary);
+        box-shadow: 0 0 0 3px var(--primary-soft);
+      }
+      .filters {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+        margin-top: 8px;
+      }
+      /* Ровный ряд переключателей одинаковой ширины (типы уведомлений в «Боте») */
+      .filters.even {
+        flex-wrap: nowrap;
+      }
+      .filters.even .flt {
+        flex: 1;
+        text-align: center;
+      }
+      .flt {
+        font-size: 12px;
+        padding: 5px 12px;
+        border: 1px solid var(--line-2);
+        border-radius: 14px;
+        background: var(--panel);
+        cursor: pointer;
+        color: var(--muted);
+        box-shadow: var(--sh-sm);
+      }
+      .flt:hover {
+        border-color: var(--primary);
+        color: var(--primary);
+      }
+      .flt.on {
+        background: var(--primary);
+        color: #fff;
+        border-color: var(--primary);
+        box-shadow: var(--sh-primary);
+      }
+      .flt.on:hover {
+        color: #fff;
+      }
+      /* Панель форматирования над редактором шаблона (жирный/курсив/зачёркнутый/
+         моноширинный). Символы разметки уходят клиенту как есть — рендерит их
+         сам MAX; кнопки лишь оборачивают выделенный текст. См. TPL_FORMATS в JS. */
+      .fmtbar {
+        display: flex;
+        gap: 6px;
+        margin-bottom: 8px;
+        flex-wrap: wrap;
+      }
+      .fmtbtn {
+        width: 34px;
+        height: 32px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid var(--line-2);
+        background: var(--panel);
+        border-radius: var(--r-sm);
+        cursor: pointer;
+        color: var(--text);
+        font-size: 14px;
+        line-height: 1;
+        box-shadow: var(--sh-sm);
+        transition:
+          border-color 0.15s,
+          box-shadow 0.15s,
+          transform 0.15s,
+          color 0.15s;
+      }
+      .fmtbtn:hover {
+        border-color: var(--primary);
+        color: var(--primary);
+        box-shadow: var(--sh);
+        transform: translateY(-1px);
+      }
+      .fmtbtn:active {
+        transform: translateY(0);
+      }
+      /* Метка мессенджера + непрочитанные */
+      .mtag {
+        font-size: 10px;
+        color: var(--muted);
+        font-weight: 400;
+      }
+      .conv.unread {
+        background: var(--unread);
+      }
+      .conv.unread .nm {
+        font-weight: 700;
+      }
+      .conv .unr {
+        margin-left: auto;
+        background: var(--primary);
+        color: #fff;
+        font-size: 11px;
+        font-weight: 700;
+        min-width: 18px;
+        height: 18px;
+        border-radius: 9px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0 5px;
+        align-self: center;
+      }
+      .tab .cnt {
+        background: var(--primary);
+        color: #fff;
+        font-size: 11px;
+        border-radius: 9px;
+        padding: 0 6px;
+        margin-left: 6px;
+      }
+      /* Шаблоны быстрых ответов */
+      .tplbtn {
+        height: 40px;
+        width: 40px;
+        min-width: 40px;
+        padding: 0;
+        border: 1px solid var(--line-2);
+        background: var(--panel);
+        border-radius: 20px;
+        cursor: pointer;
+        font-size: 18px;
+        flex-shrink: 0;
+        color: var(--text);
+        box-shadow: var(--sh-sm);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        transition:
+          border-color 0.15s,
+          box-shadow 0.15s,
+          transform 0.15s,
+          background 0.15s;
+      }
+      .tplbtn:not(:disabled):not(.dis):hover {
+        border-color: var(--primary);
+        color: var(--primary);
+        box-shadow:
+          0 0 0 3px var(--primary-soft),
+          var(--sh);
+        transform: translateY(-1px);
+      }
+      .tplbtn.on {
+        background: var(--panel);
+        border-color: var(--primary);
+        color: var(--primary);
+        box-shadow: 0 0 0 3px var(--primary-soft);
+      }
+      /* Чат не выбран → молния/скрепка погашены и НЕ реагируют на наведение (label нельзя disabled, поэтому .dis) */
+      .tplbtn:disabled,
+      .tplbtn.dis {
+        opacity: 0.45;
+        pointer-events: none;
+        cursor: default;
+        box-shadow: var(--sh-sm);
+        transform: none;
+      }
+      .tplbox {
+        position: absolute;
+        bottom: 60px;
+        right: 12px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        box-shadow: 0 8px 30px rgba(0, 0, 0, 0.15);
+        width: 320px;
+        max-height: 300px;
+        overflow-y: auto;
+        z-index: 5;
+        display: none;
+      }
+      .tplbox .ti {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 9px 12px;
+        border-bottom: 1px solid var(--line);
+        font-size: 13px;
+      }
+      .tplbox .ti .tx {
+        flex: 1;
+        min-width: 0;
+        cursor: pointer;
+        overflow: hidden;
+      }
+      .tplbox .ti:hover {
+        background: var(--primary-soft);
+      }
+      .tplbox .ti b {
+        display: block;
+        color: var(--primary);
+        font-size: 12px;
+      }
+      .tplbox .tact {
+        cursor: pointer;
+        font-size: 13px;
+        color: var(--muted);
+        padding: 2px 4px;
+        flex-shrink: 0;
+      }
+      .tplbox .tact:hover {
+        color: var(--primary);
+      }
+      .tplbox .tadd {
+        padding: 9px 12px;
+        color: var(--primary);
+        cursor: pointer;
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .main {
+        position: relative;
+      }
+      /* Превью прикреплённых фото перед отправкой */
+      .fprev {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+        padding: 8px 12px;
+        border-top: 1px solid var(--line);
+        background: var(--bg);
+      }
+      .fitem {
+        position: relative;
+        width: 54px;
+        height: 54px;
+      }
+      .fitem img,
+      .fitem video,
+      .fitem .doc {
+        width: 54px;
+        height: 54px;
+        object-fit: cover;
+        border-radius: 8px;
+      }
+      .fitem .doc {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: var(--chip);
+        font-size: 22px;
+      }
+      .fitem .rm {
+        position: absolute;
+        top: -6px;
+        right: -6px;
+        border: 0;
+        background: var(--primary-bd);
+        color: var(--primary);
+        border-radius: 50%;
+        width: 20px;
+        height: 20px;
+        cursor: pointer;
+        font-size: 12px;
+        line-height: 1;
+        padding: 0;
+      }
+      /* Мобильная адаптация */
+      @media (max-width: 720px) {
+        .nav {
+          padding: 0 10px;
+          gap: 4px;
+        }
+        .nav b {
+          font-size: 15px;
+          margin-right: 6px;
+        }
+        .nav .who {
+          display: none;
+        }
+        #vChats {
+          grid-template-columns: 1fr;
+        }
+        .side {
+          position: absolute;
+          inset: 0;
+          z-index: 3;
+        }
+        #vChats.open .side {
+          display: none;
+        }
+        #vChats.open .main {
+          display: flex;
+        }
+        #vChats:not(.open) .main {
+          display: none;
+        }
+        .head .back {
+          display: inline-block;
+        }
+        .bub {
+          max-width: 85%;
+        }
+        .bar {
+          flex-wrap: wrap;
+        }
+        .bar input {
+          min-width: 120px;
+        }
+        .tplbox {
+          width: 90vw;
+          right: 5vw;
+        }
+        #vBot {
+          grid-template-columns: 1fr;
+          overflow-y: auto;
+        }
+      }
+      .head .back {
+        display: none;
+        background: none;
+        border: 0;
+        font-size: 20px;
+        cursor: pointer;
+        color: var(--text);
+        margin-right: 8px;
+      }
+      /* Заказы — структурированный список строк во всю ширину */
+      #orders {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      .ordcard {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 20px;
+        flex-wrap: wrap;
+      }
+      .ordcard .oinfo {
+        flex: 1;
+        min-width: 240px;
+      }
+      /* Кнопки заказа — столбиком, одинаковой ширины */
+      .ordcard .oside {
+        display: flex;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 8px;
+        width: 190px;
+        flex: none;
+      }
+      .ordcard .oside > .obtn,
+      .ordcard .oside > .dd,
+      .ordcard .oside > .dd .dd-btn {
+        width: 100%;
+      }
+      /* Текст статуса по центру кнопки: левый отступ = правому (под стрелку ▾) */
+      .ordcard .oside > .dd .dd-btn {
+        text-align: center;
+        padding-left: 28px;
+      }
+      .ordcard .obadge {
+        font-weight: 700;
+        font-size: 13px;
+        white-space: nowrap;
+      }
+      /* Поля брони в карточке заказа: «метка — значение», каждое отдельной строкой */
+      .ordcard .ofields {
+        margin-top: 8px;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .ordcard .orow {
+        display: flex;
+        gap: 8px;
+        font-size: 13px;
+        line-height: 1.45;
+      }
+      .ordcard .orow .ok {
+        flex: 0 0 88px;
+        color: var(--muted);
+      }
+      .ordcard .orow .ov {
+        flex: 1;
+        min-width: 0;
+        color: var(--text);
+      }
+      /* Ряд кнопок одинаковой ширины (импорт/экспорт и т.п.).
+     minmax(0,1fr) — а НЕ 1fr — иначе колонка расширяется под содержимое (у label со скрытым input) и кнопки разной ширины. */
+      .btnrow {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        gap: 10px;
+      }
+      /* .mbox в селекторе обязателен — иначе .mbox label (0,1,1) перебивает по специфичности и кнопка-«Импорт» (label) отличается шрифтом/цветом/выравниванием */
+      .mbox .btnrow > * {
+        min-width: 0;
+        width: 100%;
+        height: 44px;
+        margin: 0;
+        box-sizing: border-box;
+        text-align: center;
+        padding: 0 10px;
+        line-height: 1;
+        text-decoration: none;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 13px;
+        font-weight: 400;
+        color: var(--text);
+      }
+      /* Кнопки действий заказа — всегда с чёткой обводкой */
+      .obtn {
+        border: 1px solid var(--line-2);
+        background: var(--panel);
+        border-radius: var(--r-sm);
+        padding: 7px 12px;
+        cursor: pointer;
+        font-size: 13px;
+        color: var(--text);
+        box-shadow: var(--sh-sm);
+        transition: 0.14s;
+      }
+      .obtn:hover {
+        border-color: var(--primary);
+        color: var(--primary);
+        box-shadow: var(--sh);
+        transform: translateY(-1px);
+      }
+      .obtn:focus {
+        outline: none;
+        border-color: var(--primary);
+      }
+      .obtn.del {
+        color: var(--primary);
+        border-color: var(--primary-bd);
+      }
+      .obtn.del:hover {
+        background: var(--primary);
+        color: #fff;
+        border-color: var(--primary);
+      }
+      /* Кастомный селект статуса под стиль панели */
+      .dd {
+        position: relative;
+      }
+      .dd-btn {
+        border: 1px solid var(--line-2);
+        background: var(--panel);
+        border-radius: var(--r-sm);
+        padding: 7px 28px 7px 12px;
+        cursor: pointer;
+        font-size: 13px;
+        font-weight: 600;
+        position: relative;
+        min-width: 150px;
+        text-align: left;
+        box-shadow: var(--sh-sm);
+        color: var(--text);
+      }
+      .dd-btn:hover {
+        border-color: var(--primary);
+      }
+      .dd-btn:after {
+        content: "▾";
+        position: absolute;
+        right: 10px;
+        top: 50%;
+        transform: translateY(-50%);
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .dd-btn:focus {
+        outline: none;
+        border-color: var(--primary);
+      }
+      .dd-menu {
+        position: absolute;
+        left: 0;
+        top: calc(100% + 4px);
+        z-index: 50;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 11px;
+        box-shadow: var(--sh-md);
+        min-width: 180px;
+        overflow: hidden;
+        display: none;
+      }
+      .dd.open {
+        position: relative;
+        z-index: 50;
+      }
+      .dd.open .dd-menu {
+        display: block;
+        animation: fadeUp 0.16s ease both;
+      }
+      /* заказ слегка приподнимается при наведении, как остальные карточки… */
+      #orders .kbcard:hover {
+        transform: translateY(-2px);
+      }
+      /* …но НЕ двигается, пока открыт выпадающий список статуса — иначе трудно попасть по пункту */
+      #orders .kbcard:has(.dd.open),
+      #orders .kbcard:has(.dd.open):hover {
+        transform: none;
+      }
+      .dd-opt {
+        padding: 9px 13px;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .dd-opt:hover {
+        background: var(--primary-soft);
+      }
+      .dd-opt.on {
+        background: var(--primary-soft);
+        color: var(--primary);
+      }
+      /* Иконочные кнопки (✎ 🗑 ✓) — единый стиль для всей панели */
+      .ic {
+        border: 1px solid var(--line-2);
+        background: var(--panel);
+        border-radius: var(--r-sm);
+        width: 32px;
+        height: 32px;
+        cursor: pointer;
+        font-size: 14px;
+        color: var(--text);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+        box-shadow: var(--sh-sm);
+        transition:
+          transform 0.14s ease,
+          border-color 0.14s ease,
+          background 0.14s ease,
+          color 0.14s ease,
+          box-shadow 0.14s ease;
+      }
+      .ic:hover {
+        border-color: var(--primary);
+        color: var(--primary);
+        background: var(--primary-soft);
+      }
+      .ic:active {
+        transform: scale(0.94);
+      }
+      .ic.del {
+        color: var(--primary);
+        border-color: var(--primary-bd);
+      }
+      .ic.del:hover {
+        background: var(--primary);
+        color: #fff;
+        border-color: var(--primary);
+      }
+      .ic.ok {
+        background: var(--primary);
+        color: #fff;
+        border-color: var(--primary);
+      }
+      .ic.ok:hover {
+        background: var(--primary-d);
+        border-color: var(--primary-d);
+        color: #fff;
+      }
+      /* Инструкция (кнопка «?») — структурированный, легко читаемый вид */
+      .help-doc section {
+        margin-bottom: 18px;
+      }
+      .help-doc section:last-child {
+        margin-bottom: 0;
+      }
+      .help-doc h4 {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 0 0 9px;
+        font-size: 14.5px;
+        color: var(--text);
+        font-weight: 700;
+      }
+      .help-doc h4 .own {
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--primary);
+        background: var(--primary-soft);
+        border-radius: 20px;
+        padding: 2px 8px;
+      }
+      .help-doc ul {
+        margin: 0;
+        padding: 0;
+        list-style: none;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .help-doc li {
+        position: relative;
+        padding-left: 17px;
+        font-size: 13px;
+        color: var(--muted);
+        line-height: 1.5;
+      }
+      .help-doc li:before {
+        content: "";
+        position: absolute;
+        left: 3px;
+        top: 7px;
+        width: 5px;
+        height: 5px;
+        border-radius: 50%;
+        background: var(--primary);
+      }
+      .help-doc b.k {
+        color: var(--primary);
+        font-weight: 600;
+      }
+      /* Подпись над примером отправки: какой тип уведомления сейчас показан */
+      .ptype {
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--primary);
+        background: var(--primary-soft);
+        border: 1px solid var(--primary-bd);
+        border-radius: 20px;
+        padding: 3px 12px;
+        white-space: nowrap;
+      }
+      /* Пометка рядом с именем в карточке клиента: у номера нет аккаунта MAX (или скрыт приватностью) */
+      .nomax-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 2px 9px;
+        border-radius: 16px;
+        font-size: 11px;
+        font-weight: 600;
+        line-height: 1.3;
+        white-space: nowrap;
+        vertical-align: middle;
+        color: var(--warn);
+        background: color-mix(in srgb, var(--warn) 12%, var(--panel));
+        border: 1px solid color-mix(in srgb, var(--warn) 34%, var(--panel));
+      }
+      .help-doc .tip {
+        margin-top: 4px;
+        font-size: 12.5px;
+        color: var(--muted);
+        background: var(--primary-soft);
+        border: 1px solid var(--primary-bd);
+        border-radius: 10px;
+        padding: 11px 13px;
+        line-height: 1.5;
+      }
+      /* Кастомные чекбоксы под стиль панели */
+      input[type="checkbox"] {
+        appearance: none;
+        -webkit-appearance: none;
+        width: 20px;
+        height: 20px;
+        border: 1.5px solid var(--line-2);
+        border-radius: 6px;
+        vertical-align: -5px;
+        margin: 0 6px 0 0;
+        cursor: pointer;
+        position: relative;
+        flex-shrink: 0;
+        transition:
+          background 0.15s,
+          border-color 0.15s,
+          box-shadow 0.15s;
+        background: var(--panel);
+      }
+      input[type="checkbox"]:hover {
+        border-color: var(--primary);
+      }
+      input[type="checkbox"]:checked {
+        background: var(--primary);
+        border-color: var(--primary);
+        box-shadow: 0 0 0 3px var(--primary-soft);
+      }
+      input[type="checkbox"]:checked:after {
+        content: "";
+        position: absolute;
+        left: 6px;
+        top: 2px;
+        width: 5px;
+        height: 10px;
+        border: solid #fff;
+        border-width: 0 2px 2px 0;
+        transform: rotate(45deg);
+        animation: checkPop 0.22s cubic-bezier(0.34, 1.4, 0.5, 1) both;
+      }
+      @keyframes checkPop {
+        from {
+          opacity: 0;
+          transform: rotate(45deg) scale(0.4);
+        }
+        to {
+          opacity: 1;
+          transform: rotate(45deg) scale(1);
+        }
+      }
+      .mbox select.fld {
+        appearance: none;
+        background: var(--panel)
+          url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%238A94A6'/%3E%3C/svg%3E")
+          no-repeat right 14px center;
+        cursor: pointer;
+      }
+      /* Действия над сообщением (редактировать/удалить) */
+      .row {
+        position: relative;
+      }
+      .msgacts {
+        position: absolute;
+        top: -9px;
+        display: none;
+        gap: 4px;
+        z-index: 2;
+      }
+      .row.m .msgacts,
+      .row.b .msgacts {
+        right: 6px;
+      }
+      .row.c .msgacts {
+        left: 6px;
+      }
+      .row:hover .msgacts {
+        display: flex;
+      }
+      /* Кнопки над сообщением (✎ 🗑) — тот же вид, что и иконочные .ic по всей панели */
+      .msgacts button {
+        border: 1px solid var(--line-2);
+        background: var(--panel);
+        border-radius: var(--r-sm);
+        width: 30px;
+        height: 30px;
+        cursor: pointer;
+        font-size: 13px;
+        color: var(--text);
+        box-shadow: var(--sh-sm);
+        padding: 0;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        transition:
+          transform 0.14s ease,
+          border-color 0.14s,
+          background 0.14s,
+          color 0.14s,
+          box-shadow 0.14s;
+      }
+      /* На hover оставляем СПЛОШНОЙ фон панели (а не полупрозрачный primary-soft, который в тёмной теме «пропадал»),
+     подсвечиваем кольцом и тенью в тон акцента. */
+      .msgacts button:hover {
+        border-color: var(--primary);
+        color: var(--primary);
+        background: var(--panel);
+        box-shadow:
+          0 0 0 2px var(--primary-soft),
+          var(--sh);
+        transform: translateY(-1px);
+      }
+      .msgacts button:active {
+        transform: scale(0.94);
+      }
+      .msgacts button.del {
+        color: var(--primary);
+        border-color: var(--primary-bd);
+      }
+      .msgacts button.del:hover {
+        background: var(--primary);
+        color: #fff;
+        border-color: var(--primary);
+      }
+      /* Заблокированные поля (например, стоп-слова при выключенной передаче) */
+      textarea:disabled,
+      .fld:disabled {
+        background: var(--disabled);
+        color: var(--muted);
+        cursor: not-allowed;
+        border-color: var(--line);
+        opacity: 0.75;
+      }
+      input::placeholder,
+      textarea::placeholder,
+      .fld::placeholder {
+        color: var(--muted);
+        opacity: 0.75;
+      }
+      /* Крупные кнопки-переключатели метрик в аналитике */
+      .mbtn {
+        font-size: 13px;
+        padding: 8px 18px;
+        border: 1px solid var(--line);
+        border-radius: 22px;
+        background: var(--panel);
+        cursor: pointer;
+        color: var(--muted);
+        font-weight: 600;
+        transition:
+          transform 0.16s ease,
+          box-shadow 0.16s ease,
+          background 0.16s,
+          color 0.16s,
+          border-color 0.16s;
+      }
+      .mbtn:hover {
+        border-color: var(--primary);
+        color: var(--primary);
+        transform: translateY(-1px);
+      }
+      .mbtn:active {
+        transform: translateY(0) scale(0.96);
+      }
+      .mbtn.on {
+        background: var(--primary);
+        color: #fff;
+        border-color: var(--primary);
+        box-shadow: 0 6px 16px color-mix(in srgb, var(--primary) 28%, transparent);
+      }
+      /* Ряд переключателей метрик аналитики — одинаковой ширины */
+      .metric-tabs {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 10px;
+      }
+      .metric-tabs .mbtn {
+        flex: 1;
+        text-align: center;
+        padding-left: 8px;
+        padding-right: 8px;
+      }
+      /* Кнопка справки слева снизу */
+      .status {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .help {
+        width: 30px;
+        height: 30px;
+        border-radius: 50%;
+        border: 1.5px solid var(--line);
+        background: var(--panel);
+        color: var(--muted);
+        font-weight: 700;
+        font-size: 15px;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+        transition:
+          transform 0.18s ease,
+          box-shadow 0.18s,
+          border-color 0.18s,
+          color 0.18s,
+          background 0.18s;
+      }
+      .help:hover {
+        border-color: var(--primary);
+        color: #fff;
+        background: var(--primary);
+        transform: scale(1.1) rotate(8deg);
+        box-shadow: 0 6px 18px color-mix(in srgb, var(--primary) 35%, transparent);
+      }
+      /* Тонкая ссылка-бэкап (не яркая) */
+      .linkbtn {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: none;
+        border: 0;
+        color: var(--muted);
+        font-size: 13px;
+        cursor: pointer;
+        text-decoration: none;
+        padding: 4px 0;
+        transition:
+          color 0.15s,
+          transform 0.15s;
+      }
+      .linkbtn:hover {
+        color: var(--primary);
+        transform: translateX(2px);
+      }
+      /* ---------- Анимации ---------- */
+      @keyframes fadeUp {
+        from {
+          opacity: 0;
+          transform: translateY(10px);
+        }
+        to {
+          opacity: 1;
+          transform: none;
+        }
+      }
+      @keyframes pop {
+        from {
+          opacity: 0;
+          transform: translateY(8px) scale(0.97);
+        }
+        to {
+          opacity: 1;
+          transform: none;
+        }
+      }
+      @keyframes growUp {
+        from {
+          transform: scaleY(0);
+        }
+        to {
+          transform: scaleY(1);
+        }
+      }
+      @keyframes overlayIn {
+        from {
+          opacity: 0;
+        }
+        to {
+          opacity: 1;
+        }
+      }
+      .anim {
+        animation: fadeUp 0.28s ease both;
+      }
+      .mbox,
+      .card {
+        animation: pop 0.26s cubic-bezier(0.34, 1.3, 0.5, 1) both;
+      }
+      #modal,
+      #modal2,
+      #confirm,
+      #lightbox {
+        animation: overlayIn 0.18s ease;
+      }
+      .conv {
+        transition: background 0.15s ease;
+      }
+      .tab,
+      .flt,
+      .add,
+      .mini,
+      .obtn,
+      .filebtn,
+      .dd-btn,
+      .dd-opt,
+      .tplbtn,
+      .bar button {
+        transition:
+          transform 0.15s ease,
+          box-shadow 0.15s ease,
+          background 0.15s,
+          color 0.15s,
+          border-color 0.15s,
+          opacity 0.15s;
+      }
+      .add:active,
+      .mini:active,
+      .obtn:active,
+      .flt:active,
+      .tab:active {
+        transform: scale(0.96);
+      }
+      .add:hover {
+        box-shadow: 0 6px 16px color-mix(in srgb, var(--primary) 28%, transparent);
+      }
+      .kbcard {
+        transition:
+          box-shadow 0.2s ease,
+          transform 0.2s ease,
+          border-color 0.15s ease,
+          opacity 0.15s ease;
+      }
+      .kbcard:hover {
+        box-shadow: var(--sh-md);
+        border-color: var(--line-2);
+        transform: translateY(-2px);
+      }
+    </style>
+  </head>
+  <body spellcheck="false">
+    <div id="login">
+      <form class="card" onsubmit="doLogin(event)">
+        <h1>Админ-панель</h1>
+        <p>Вход для администратора</p>
+        <div class="err" id="lerr"></div>
+        <input id="u" placeholder="Логин" autocomplete="username" />
+        <input id="p" type="password" placeholder="Пароль" autocomplete="current-password" />
+        <button type="submit">Войти</button>
+      </form>
+    </div>
+
+    <div id="app">
+      <div class="nav">
+        <b id="navTitle" onclick="location.reload()" style="cursor: pointer" title="Обновить панель"
+          >💬 Админ-панель</b
+        >
+        <button class="tab on" id="tabChats" onclick="showView('chats')">Диалоги</button>
+        <button class="tab" id="tabOrders" onclick="showView('orders')">Заказы</button>
+        <button class="tab" id="tabBot" onclick="showView('bot')">Бот</button>
+        <button class="tab" id="tabStats" onclick="showView('stats')">Аналитика</button>
+        <button class="tab" id="tabAdmin" onclick="showView('admin')" style="display: none">
+          Управление
+        </button>
+        <div class="sp"></div>
+        <button class="gear" id="gearBtn" onclick="openSettings()" title="Настройки">⚙</button>
+        <span class="who" id="who"></span>
+        <button class="out" onclick="doLogout()">Выйти</button>
+      </div>
+      <div class="viewport">
+        <!-- Диалоги -->
+        <div id="vChats">
+          <div class="side">
+            <div class="srch">
+              <input id="q" placeholder="🔎 Поиск по имени…" oninput="renderClients()" />
+              <div class="filters" id="filters"></div>
+            </div>
+            <div class="list" id="list"></div>
+          </div>
+          <div class="main">
+            <div class="head">
+              <button class="back" onclick="backToList()">←</button>
+              <div class="title" id="title">Выберите диалог</div>
+              <div style="flex: 1"></div>
+              <button
+                class="mini"
+                id="cardBtn"
+                onclick="openCard()"
+                style="display: none; margin-right: 10px"
+              >
+                👤 Карточка
+              </button>
+            </div>
+            <div class="chat" id="chat"></div>
+            <div class="fprev" id="fprev" style="display: none"></div>
+            <div class="bar">
+              <textarea
+                id="msg"
+                rows="1"
+                placeholder="Написать клиенту…"
+                oninput="growBar(this)"
+                onkeydown="barKey(event, sendMsg)"
+              ></textarea>
+              <button class="tplbtn" id="tplbtn" onclick="toggleTpl()" title="Шаблоны" disabled>
+                ⚡
+              </button>
+              <label class="tplbtn dis" id="filelbl" title="Прикрепить файл или фото (до 5)"
+                >📎
+                <input
+                  type="file"
+                  id="cfile"
+                  accept="image/*,video/*,application/pdf"
+                  multiple
+                  style="display: none"
+                  onchange="attachFile()"
+              /></label>
+              <button class="b-send" id="send" onclick="sendMsg()" disabled>Отправить</button>
+              <div class="tplbox" id="tplbox"></div>
+            </div>
+          </div>
+        </div>
+        <!-- Заказы -->
+        <div id="vOrders" style="display: none; height: 100%; overflow-y: auto; padding: 24px">
+          <h2
+            style="
+              font-size: 18px;
+              line-height: 1;
+              margin: 0 0 14px;
+              display: flex;
+              align-items: center;
+              justify-content: space-between;
+            "
+          >
+            Заказы
+            <button
+              class="obtn"
+              onclick="openOrdersCsv()"
+              title="Импорт или экспорт заказов (CSV/Excel)"
+            >
+              📊 Импорт / экспорт
+            </button>
+          </h2>
+          <div class="filters" id="ordFilters" style="margin-bottom: 14px"></div>
+          <div id="orders"></div>
+          <div style="height: 40px"></div>
+        </div>
+        <!-- Бот: шаблоны уведомлений + предпросмотр отправки -->
+        <div
+          id="vBot"
+          style="
+            display: none;
+            height: 100%;
+            overflow: hidden;
+            grid-template-columns: minmax(320px, 440px) 1fr;
+          "
+        >
+          <!-- Правила -->
+          <div
+            style="
+              border-right: 1px solid var(--line);
+              background: var(--panel);
+              overflow-y: auto;
+              padding: 20px;
+            "
+          >
+            <h2 style="font-size: 18px; margin: 0 0 6px">Шаблоны сообщений</h2>
+            <div class="s" style="color: var(--muted); margin-bottom: 12px; font-size: 12px">
+              Текст, который бот отправляет клиенту в MAX на каждое событие брони. Выберите тип
+              уведомления, отредактируйте текст и сразу проверьте результат в примере справа.
+            </div>
+            <!-- Переключатель типа уведомления: подтверждение / изменение / отмена -->
+            <div class="filters even" id="tplTabs" style="margin-bottom: 12px"></div>
+            <!-- Форматирование: выделите текст в поле ниже и нажмите кнопку —
+                 выделение обернётся разметкой (жирный/курсив/зачёркнутый/моно). -->
+            <div class="fmtbar" id="tplFormatBar"></div>
+            <textarea
+              id="tplBody"
+              rows="12"
+              placeholder="Текст сообщения. Поля брони — в фигурных скобках: {имя}, {объект}, {дата}…"
+              oninput="onTemplateInput()"
+            ></textarea>
+            <div
+              style="
+                margin-top: 8px;
+                display: flex;
+                gap: 8px;
+                align-items: center;
+                flex-wrap: wrap;
+              "
+            >
+              <button class="add" onclick="saveTemplate()">Сохранить шаблон</button>
+              <button class="mini" onclick="fillTemplateExample()" title="Подставить готовый рекомендуемый текст для выбранного типа">
+                ✨ Рекомендуемый текст
+              </button>
+              <span class="saved" id="tplSaved"></span>
+            </div>
+            <!-- Одно общее фото к уведомлению (например логотип): бот шлёт его следом
+                 за текстом при новой брони и изменении. Хранится на сервере. -->
+            <div class="kbcard" style="margin-top: 16px">
+              <div class="t" style="font-size: 14px; margin-bottom: 4px">📷 Фото к сообщению</div>
+              <div class="s" id="notifyPhotoHint" style="color: var(--muted); margin-bottom: 12px">
+                Фото для выбранного типа уведомления — бот приложит его к сообщению.
+              </div>
+              <div style="display: flex; flex-direction: column; gap: 10px">
+                <!-- Превью на всю ширину карточки, по центру; пропорции сохраняем (contain). -->
+                <img
+                  id="notifyPhotoPreview"
+                  alt="Фото к сообщению"
+                  style="
+                    display: none;
+                    max-width: 100%;
+                    max-height: 220px;
+                    width: auto;
+                    height: auto;
+                    margin: 0 auto;
+                    border-radius: 10px;
+                    border: 1px solid var(--line);
+                  "
+                />
+                <!-- Кнопки под фото. Грид с равными колонками (1fr) гарантирует
+                     одинаковую ширину; без фото колонка одна — «Загрузить» на всю ширину. -->
+                <div id="notifyPhotoBtns" style="display: grid; grid-template-columns: 1fr; gap: 8px">
+                  <label
+                    class="filebtn"
+                    style="height: 38px; box-sizing: border-box; justify-content: center"
+                  >
+                    <input
+                      type="file"
+                      accept="image/*"
+                      style="display: none"
+                      onchange="uploadNotifyPhoto(this)"
+                    />
+                    <span id="notifyPhotoBtnLabel">＋ Загрузить фото</span>
+                  </label>
+                  <button
+                    class="mini"
+                    id="notifyPhotoRemove"
+                    onclick="removeNotifyPhoto()"
+                    style="display: none; height: 38px; box-sizing: border-box"
+                  >
+                    Убрать фото
+                  </button>
+                </div>
+                <span class="saved" id="notifyPhotoSaved"></span>
+              </div>
+            </div>
+            <div
+              class="kbcard"
+              style="
+                margin-top: 16px;
+                background: var(--primary-soft);
+                border-color: var(--primary-bd);
+              "
+            >
+              <div class="t" style="font-size: 14px">💡 Как писать шаблоны</div>
+              <div class="help-doc" style="margin-top: 10px">
+                <div class="s" style="margin-bottom: 14px">
+                  Бот подставит данные брони на место полей в фигурных скобках. Текст вокруг полей
+                  и эмодзи меняйте как угодно — это обычное сообщение клиенту.
+                </div>
+                <section>
+                  <h4 style="font-size: 13px">Доступные поля</h4>
+                  <ul id="tplFields"></ul>
+                </section>
+                <section>
+                  <h4 style="font-size: 13px">Как формулировать</h4>
+                  <ul>
+                    <li>Пишите дружелюбно и коротко — клиент читает это в мессенджере.</li>
+                    <li>Поле — в фигурных скобках, например {дата}; регистр и пробелы важны.</li>
+                    <li>Каждый блок — с новой строки, эмодзи помогают читаемости.</li>
+                    <li>
+                      Выделите слово и нажмите
+                      <b style="color: var(--text)">Ж</b> / <i>К</i> /
+                      <s>З</s> / <code style="font-family: ui-monospace, Consolas, monospace">&lt;/&gt;</code>
+                      — жирный, курсив, зачёркнутый или моноширинный текст.
+                    </li>
+                    <li>Если поля в брони нет, бот подставит прочерк «—».</li>
+                  </ul>
+                </section>
+                <div class="s" style="margin-top: 2px">
+                  Нажмите <b style="color: var(--text)">«✨ Рекомендуемый текст»</b> — подставится
+                  готовый шаблон для выбранного типа, поправьте его под себя.
+                </div>
+              </div>
+            </div>
+          </div>
+          <!-- Пример отправки: как сообщение придёт клиенту в MAX -->
+          <div style="display: flex; flex-direction: column; min-height: 0">
+            <div
+              style="
+                padding: 14px 18px;
+                border-bottom: 1px solid var(--line);
+                background: var(--panel);
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                flex-wrap: wrap;
+              "
+            >
+              <div
+                style="
+                  font-weight: 600;
+                  white-space: nowrap;
+                  display: flex;
+                  align-items: center;
+                  gap: 6px;
+                "
+              >
+                <span style="line-height: 1">📨</span> Пример отправки
+              </div>
+              <div
+                class="s"
+                style="color: var(--muted); font-size: 12px; flex: 1; min-width: 160px"
+              >
+                Так сообщение придёт клиенту в MAX. Данные брони — демонстрационные.
+              </div>
+              <!-- Пример всегда показывает тот тип, что выбран слева под текстом шаблона -->
+              <span class="ptype" id="previewLabel"></span>
+            </div>
+            <div class="chat" id="tplPreview" style="flex: 1"></div>
+          </div>
+        </div>
+        <!-- Аналитика -->
+        <div id="vStats" style="display: none; height: 100%; overflow-y: auto; padding: 24px">
+          <h2 style="font-size: 18px; margin: 0 0 14px">Аналитика</h2>
+          <div id="statCards" style="display: flex; flex-wrap: wrap; gap: 12px"></div>
+          <div class="kbcard" style="margin-top: 18px">
+            <div class="t" style="font-size: 16px; margin-bottom: 12px">Активность за 14 дней</div>
+            <div id="chartDays"></div>
+          </div>
+          <div style="display: flex; gap: 14px; flex-wrap: wrap">
+            <div class="kbcard" style="flex: 1; min-width: 280px">
+              <div class="t" style="margin-bottom: 8px">Топ объектов (по бронированиям)</div>
+              <div id="topProducts"></div>
+            </div>
+            <div class="kbcard" style="flex: 1; min-width: 280px">
+              <div class="t" style="margin-bottom: 8px">Воронка уведомлений</div>
+              <div id="funnel"></div>
+            </div>
+          </div>
+          <div style="height: 40px"></div>
+        </div>
+        <!-- Управление (только владелец) -->
+        <div id="vAdmin" style="display: none; height: 100%; overflow-y: auto; padding: 24px">
+          <h2 style="font-size: 18px; margin: 0 0 14px">Управление</h2>
+          <div style="display: flex; gap: 14px; flex-wrap: wrap; align-items: stretch">
+            <div class="kbcard" style="flex: 1; min-width: 300px">
+              <div class="t" style="margin-bottom: 10px">Состояние систем</div>
+              <div id="statusLamps"></div>
+              <div style="margin-top: 14px; border-top: 1px solid var(--line); padding-top: 10px">
+                <a class="linkbtn" id="backupBtn" href="/api/dashboard/backup"
+                  >⬇ Скачать резервную копию базы данных</a
+                >
+              </div>
+            </div>
+            <div class="kbcard" style="flex: 1; min-width: 300px">
+              <div class="t" style="margin-bottom: 10px">Уведомления</div>
+              <label style="display: flex; align-items: center"
+                ><input type="checkbox" id="bs_enabled" /> Отправка уведомлений включена</label
+              >
+              <div class="s" style="color: var(--muted); margin: 4px 0 14px 0">
+                Главный рубильник. Выключите — бот перестанет писать клиентам в MAX (брони всё
+                равно принимаются и сохраняются).
+              </div>
+              <label style="display: block; margin-bottom: 8px">Какие события отправлять</label>
+              <label style="display: flex; align-items: center"
+                ><input type="checkbox" id="bs_notify_created" /> Подтверждение брони</label
+              >
+              <label style="display: flex; align-items: center; margin-top: 6px"
+                ><input type="checkbox" id="bs_notify_updated" /> Изменение брони</label
+              >
+              <label style="display: flex; align-items: center; margin-top: 6px"
+                ><input type="checkbox" id="bs_notify_cancelled" /> Отмена брони</label
+              >
+              <div style="margin-top: 14px; border-top: 1px solid var(--line); padding-top: 12px">
+                <label>📨 Дублировать важное владельцу в Telegram</label>
+                <div class="s" style="color: var(--muted); margin: 2px 0 6px">
+                  Укажите свой юзернейм в Telegram — туда придут важные события и сбои отправки.
+                  Оставьте пустым, чтобы отключить.
+                </div>
+                <input class="fld" id="bs_owner_tg" placeholder="например @ivanov" />
+              </div>
+              <div style="margin-top: 10px">
+                <button class="add" onclick="saveBotSettings()">Сохранить</button
+                ><span class="saved" id="bsSaved"></span>
+              </div>
+            </div>
+          </div>
+          <div class="kbcard" style="margin-top: 2px">
+            <div class="t" style="margin-bottom: 10px">
+              ⚠ Сбои и ошибки <span id="alertsBadge"></span>
+              <button class="mini d" style="float: right" onclick="clearAlerts()">Очистить</button>
+            </div>
+            <div class="s" style="color: var(--muted); margin-bottom: 8px">
+              Проблемы в работе бота. Если записей много — проверьте шлюз kapuchino-api и связь.
+            </div>
+            <div id="alertsList"></div>
+          </div>
+          <div
+            style="
+              display: flex;
+              gap: 14px;
+              flex-wrap: wrap;
+              align-items: stretch;
+              margin-top: 14px;
+            "
+          >
+            <div class="kbcard" style="flex: 1; min-width: 320px">
+              <div
+                class="t"
+                style="
+                  margin-bottom: 10px;
+                  min-height: 36px;
+                  display: flex;
+                  align-items: center;
+                  justify-content: space-between;
+                "
+              >
+                Администраторы
+                <button class="add" onclick="openAdminForm()">+ Добавить</button>
+              </div>
+              <div id="adminsList"></div>
+            </div>
+            <div class="kbcard" style="flex: 1; min-width: 320px">
+              <div
+                class="t"
+                style="margin-bottom: 10px; min-height: 36px; display: flex; align-items: center"
+              >
+                Журнал входов
+              </div>
+              <div id="loginLog"></div>
+            </div>
+          </div>
+          <div style="height: 40px"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="modal"><div class="mbox" id="mbox"></div></div>
+    <div
+      id="modal2"
+      style="
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.45);
+        display: none;
+        align-items: center;
+        justify-content: center;
+        z-index: 15;
+      "
+    >
+      <div class="mbox" id="mbox2"></div>
+    </div>
+    <div id="lightbox" onclick="closeLightbox()">
+      <img id="lbimg" />
+      <video id="lbvideo" controls playsinline style="display: none" onclick="event.stopPropagation()"></video>
+    </div>
+    <div
+      id="confirm"
+      style="
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.45);
+        display: none;
+        align-items: center;
+        justify-content: center;
+        z-index: 40;
+      "
+    >
+      <div class="mbox" id="cbox" style="width: 400px; max-width: 92vw"></div>
+    </div>
+    <div class="status">
+      <button class="help" onclick="openHelp()" title="Инструкция по панели">?</button
+      ><span id="conn" title="Статус соединения">●</span>
+    </div>
+
+    <script>
+      /* =========================================================================
+         ЛОГИКА АДМИН-ПАНЕЛИ
+
+         Карта секций (ищите по баннерам «---------- Название ----------»):
+           • Оформление       — гаммы (ACCENTS), темы, название/иконка, настройки.
+           • Диалоги          — список клиентов, переписка, отправка, шаблоны.
+           • Голосовые/медиа  — кастомный плеер и карточки файлов.
+           • Заказы           — список броней, фильтры, смена статуса, сигнал о новой брони.
+           • Шаблоны бота       — тексты уведомлений (подтверждение/изменение/отмена) + пример.
+           • Аналитика         — карточки, гистограмма, воронка (accentPalette).
+           • Управление        — статус систем, настройки бота, админы, журнал.
+           • Модалки/утилиты    — showModal, uiConfirm/uiAlert, autoGrow и т.п.
+
+         Принципы:
+           • Опрос: tick() раз в ~2с тянет данные и перерисовывает только то, что
+             изменилось (сравнение по «сигнатуре» — *Sig переменные).
+           • Оптимистичный UI: своё сообщение и вход в диалог показываются сразу,
+             не дожидаясь ответа сервера (см. sendMsg / optimisticEnter).
+         ========================================================================= */
+
+      /* ---------- Оформление: тема, цветовая гамма, название, иконка ---------- */
+      /* Цветовые гаммы. Каждая задаёт акцент (--primary и производные) отдельно для
+         светлой и тёмной темы плюс цвет навбара. Применяются inline на <html> —
+         поэтому перебивают и базовые, и тёмные стили. */
+      const ACCENTS = {
+        default: {
+          name: "Розовый",
+          dot: "#D6336C",
+          light: {
+            p: "#D6336C",
+            d: "#B02A57",
+            soft: "#FBE8EF",
+            sh: "rgba(214,51,108,.28)",
+            n1: "#3A2B36",
+            n2: "#2A1F27",
+          },
+          dark: {
+            p: "#EA6E97",
+            d: "#D6336C",
+            soft: "rgba(234,110,151,.16)",
+            sh: "rgba(214,51,108,.45)",
+            n1: "#241820",
+            n2: "#14161D",
+          },
+        },
+        red: {
+          name: "Красный",
+          dot: "#E03131",
+          light: {
+            p: "#E03131",
+            d: "#C92A2A",
+            soft: "#FFE3E3",
+            sh: "rgba(224,49,49,.28)",
+            n1: "#3A2424",
+            n2: "#2A1A1A",
+          },
+          dark: {
+            p: "#FF6B6B",
+            d: "#E03131",
+            soft: "rgba(255,107,107,.16)",
+            sh: "rgba(224,49,49,.45)",
+            n1: "#231717",
+            n2: "#160F0F",
+          },
+        },
+        orange: {
+          name: "Оранжевый",
+          dot: "#E8590C",
+          light: {
+            p: "#E8590C",
+            d: "#D9480F",
+            soft: "#FFE8CC",
+            sh: "rgba(232,89,12,.28)",
+            n1: "#3A2C20",
+            n2: "#2A2016",
+          },
+          dark: {
+            p: "#FF922B",
+            d: "#E8590C",
+            soft: "rgba(255,146,43,.16)",
+            sh: "rgba(232,89,12,.45)",
+            n1: "#231a12",
+            n2: "#16100b",
+          },
+        },
+        amber: {
+          name: "Янтарный",
+          dot: "#F08C00",
+          light: {
+            p: "#F08C00",
+            d: "#E67700",
+            soft: "#FFF3BF",
+            sh: "rgba(240,140,0,.28)",
+            n1: "#393020",
+            n2: "#2A2316",
+          },
+          dark: {
+            p: "#FFC93C",
+            d: "#F0A500",
+            soft: "rgba(255,201,60,.16)",
+            sh: "rgba(240,140,0,.45)",
+            n1: "#231d10",
+            n2: "#16120a",
+          },
+        },
+        green: {
+          name: "Зелёный",
+          dot: "#2F9E44",
+          light: {
+            p: "#2F9E44",
+            d: "#2B8A3E",
+            soft: "#D3F9D8",
+            sh: "rgba(47,158,68,.28)",
+            n1: "#22362A",
+            n2: "#192a20",
+          },
+          dark: {
+            p: "#51CF66",
+            d: "#2F9E44",
+            soft: "rgba(81,207,102,.16)",
+            sh: "rgba(47,158,68,.45)",
+            n1: "#13211a",
+            n2: "#0c1610",
+          },
+        },
+        teal: {
+          name: "Бирюзовый",
+          dot: "#0CA678",
+          light: {
+            p: "#0CA678",
+            d: "#099268",
+            soft: "#C3FAE8",
+            sh: "rgba(12,166,120,.28)",
+            n1: "#1f3833",
+            n2: "#152a26",
+          },
+          dark: {
+            p: "#20C997",
+            d: "#0CA678",
+            soft: "rgba(32,201,151,.16)",
+            sh: "rgba(12,166,120,.45)",
+            n1: "#10231e",
+            n2: "#0a1613",
+          },
+        },
+        blue: {
+          name: "Синий",
+          dot: "#1971C2",
+          light: {
+            p: "#1971C2",
+            d: "#1864AB",
+            soft: "#D0EBFF",
+            sh: "rgba(25,113,194,.28)",
+            n1: "#21303a",
+            n2: "#18242a",
+          },
+          dark: {
+            p: "#4DABF7",
+            d: "#1971C2",
+            soft: "rgba(77,171,247,.16)",
+            sh: "rgba(25,113,194,.45)",
+            n1: "#101c23",
+            n2: "#0a1216",
+          },
+        },
+        violet: {
+          name: "Фиолетовый",
+          dot: "#7048E8",
+          light: {
+            p: "#7048E8",
+            d: "#5F3DC4",
+            soft: "#E5DBFF",
+            sh: "rgba(112,72,232,.28)",
+            n1: "#2e2840",
+            n2: "#221e2f",
+          },
+          dark: {
+            p: "#9775FA",
+            d: "#7048E8",
+            soft: "rgba(151,117,250,.16)",
+            sh: "rgba(112,72,232,.45)",
+            n1: "#191324",
+            n2: "#100c16",
+          },
+        },
+      };
+      const ICONS = [
+        // Торговля и магазин
+        "💬",
+        "🛍️",
+        "🛒",
+        "🏪",
+        "🏬",
+        "📦",
+        "🏷️",
+        "🧾",
+        // Финансы и бизнес
+        "💳",
+        "💰",
+        "💵",
+        "🏦",
+        "📊",
+        "📈",
+        "💼",
+        "🤝",
+        // Кафе, еда, рестораны
+        "☕",
+        "🍰",
+        "🧁",
+        "🍔",
+        "🍕",
+        "🍣",
+        "🍷",
+        "🥗",
+        // Красота, салон, мода
+        "💄",
+        "💅",
+        "💇",
+        "💈",
+        "👗",
+        "👜",
+        "👠",
+        "💍",
+        // Аптека и медицина
+        "💊",
+        "💉",
+        "🩺",
+        "🏥",
+        "⚕️",
+        "🩹",
+        "🦷",
+        "🧬",
+        // Техника, IT, услуги
+        "💻",
+        "📱",
+        "🤖",
+        "⚙️",
+        "🔧",
+        "🛠️",
+        "🔌",
+        "🎧",
+        // Авто, доставка, дом, обучение, прочее
+        "🚗",
+        "🚚",
+        "🏠",
+        "🔨",
+        "🎓",
+        "🐾",
+        "🌿",
+        "⭐",
+        // Сердечки — последний ряд
+        "❤️",
+        "🧡",
+        "💛",
+        "💚",
+        "💙",
+        "💜",
+        "🖤",
+        "🤍",
+      ];
+      const APP_DEFNAME = "Админ-панель";
+      let APP_NAME = (localStorage.getItem("appName") || "").trim() || APP_DEFNAME;
+      let APP_ICON = localStorage.getItem("appIcon") || "💬";
+
+      function curAccentKey() {
+        const k = localStorage.getItem("accent");
+        return ACCENTS[k] ? k : "default";
+      }
+      function applyAccent(key) {
+        const a = ACCENTS[key] || ACCENTS.default;
+        const dark = document.documentElement.getAttribute("data-theme") === "dark";
+        const c = dark ? a.dark : a.light;
+        const s = document.documentElement.style;
+        s.setProperty("--primary", c.p);
+        s.setProperty("--primary-d", c.d);
+        s.setProperty("--primary-soft", c.soft);
+        s.setProperty("--sh-primary", "0 6px 18px " + c.sh);
+        // Шапка больше НЕ красится в акцент: в светлой теме светлая, в тёмной — графит (см. CSS-переменные темы).
+        // Фон пузыря бота — мягкий оттенок акцента. Пузырь менеджера использует var(--primary) напрямую
+        // (тот же цвет, что и кнопка «Отправить»), поэтому отдельная переменная не нужна.
+        s.setProperty("--bot", c.soft);
+        recolorFunnel(); // цвета воронки считаются в JS — обновляем их вживую при смене темы/гаммы
+        try {
+          localStorage.setItem("accent", key);
+        } catch (e) {}
+      }
+      /* Тема оформления (светлая/тёмная) — хранится в localStorage, применяется ко всей панели */
+      function applyTheme(t) {
+        const dark = t === "dark";
+        document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+        try {
+          localStorage.setItem("theme", dark ? "dark" : "light");
+        } catch (e) {}
+        applyAccent(curAccentKey()); // акцент зависит от темы — пересчитываем
+      }
+      function applyBranding() {
+        APP_NAME = (localStorage.getItem("appName") || "").trim() || APP_DEFNAME;
+        APP_ICON = localStorage.getItem("appIcon") || "💬";
+        const b = document.getElementById("navTitle");
+        if (b) b.textContent = APP_ICON + " " + APP_NAME;
+        document.title = APP_NAME;
+        const fav = document.getElementById("favicon");
+        if (fav) {
+          const svg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>${APP_ICON}</text></svg>`;
+          fav.href = "data:image/svg+xml," + encodeURIComponent(svg);
+        }
+      }
+      applyTheme(localStorage.getItem("theme") || "light");
+      applyBranding();
+
+      /* Оформление (гамма/название/иконка) хранится на сервере и общо для всех
+         админов. localStorage — лишь кэш для мгновенной отрисовки до ответа
+         сервера. Светлая/тёмная тема сюда НЕ входит — она личная у каждого. */
+      async function loadBranding() {
+        try {
+          const b = await (await api("/api/dashboard/branding")).json();
+          const key = ACCENTS[b.accent] ? b.accent : "default";
+          localStorage.setItem("accent", key);
+          localStorage.setItem("appName", b.app_name || "");
+          localStorage.setItem("appIcon", b.app_icon || "💬");
+          applyAccent(key);
+          applyBranding();
+        } catch (e) {}
+      }
+      // Сохраняем изменение оформления на сервер (доступно только владельцу).
+      function saveBranding(patch) {
+        api("/api/dashboard/branding", {
+          method: "PUT",
+          body: JSON.stringify(patch),
+        }).catch(() => {});
+      }
+      let _brandNameTimer = null;
+
+      /* Панель настроек */
+      function openSettings() {
+        const dark = localStorage.getItem("theme") === "dark";
+        const curName = localStorage.getItem("appName") || "";
+        const curIcon = localStorage.getItem("appIcon") || "💬";
+        const acc = curAccentKey();
+        const isOwner = myRole === "owner";
+        // Менеджеру доступна только смена темы; остальные поля показываются, но заблокированы для редактирования.
+        const icoHtml = ICONS.map(
+          (i) =>
+            `<button class="icoopt${i === curIcon ? " on" : ""}"${isOwner ? ` onclick="setIcon('${i}')"` : " disabled"}>${i}</button>`,
+        ).join("");
+        const swHtml = Object.entries(ACCENTS)
+          .map(
+            ([k, a]) =>
+              `<div class="swatch${k === acc ? " on" : ""}${isOwner ? "" : " dis"}" style="--swc:${a.dot}"${isOwner ? ` onclick="setAccent('${k}')"` : ""}><span class="dotc"></span><span class="swn">${a.name}</span></div>`,
+          )
+          .join("");
+        const lockNote = isOwner
+          ? ""
+          : `<div class="s" style="color:var(--muted);margin-bottom:14px;font-size:12px">🔒 Изменять название, иконку и цвет может только владелец.</div>`;
+        showModal(`<h3>⚙ Настройки оформления</h3>
+    ${lockNote}
+    <div class="setgrp">
+      <label>Тема</label>
+      <div class="segbtns">
+        <button class="segbtn${dark ? "" : " on"}" id="setLight" onclick="setTheme('light')">☀️ Светлая</button>
+        <button class="segbtn${dark ? " on" : ""}" id="setDark" onclick="setTheme('dark')">🌙 Тёмная</button>
+      </div>
+    </div>
+    <div class="setgrp">
+      <label>Название панели</label>
+      <input class="fld" id="setName" maxlength="40" placeholder="${APP_DEFNAME}" value="${esc(curName).replace(/"/g, "&quot;")}"${isOwner ? ' oninput="setName(this.value)"' : " disabled"}>
+      ${isOwner ? `<div class="s" style="color:var(--muted);margin-top:5px;font-size:12px">Пусто — вернётся «${APP_DEFNAME}».</div>` : ""}
+    </div>
+    <div class="setgrp">
+      <label>Иконка</label>
+      <div class="icogrid" id="setIcons">${icoHtml}</div>
+    </div>
+    <div class="setgrp">
+      <label>Цветовая гамма</label>
+      <div class="swgrid" id="setSwatches">${swHtml}</div>
+    </div>
+    <div class="mrow"><button class="add" onclick="closeModal()">Готово</button></div>`);
+      }
+      function setTheme(t) {
+        applyTheme(t);
+        document.getElementById("setLight").classList.toggle("on", t === "light");
+        document.getElementById("setDark").classList.toggle("on", t === "dark");
+      }
+      function setName(v) {
+        const t = (v || "").trim();
+        try {
+          if (t) localStorage.setItem("appName", t);
+          else localStorage.removeItem("appName");
+        } catch (e) {}
+        applyBranding();
+        // На сервер — с задержкой, чтобы не слать запрос на каждое нажатие клавиши.
+        clearTimeout(_brandNameTimer);
+        _brandNameTimer = setTimeout(() => saveBranding({ app_name: t }), 500);
+      }
+      function setIcon(i) {
+        try {
+          localStorage.setItem("appIcon", i);
+        } catch (e) {}
+        applyBranding();
+        saveBranding({ app_icon: i });
+        document
+          .querySelectorAll("#setIcons .icoopt")
+          .forEach((b) => b.classList.toggle("on", b.textContent === i));
+      }
+      function setAccent(k) {
+        applyAccent(k);
+        saveBranding({ accent: k });
+        document
+          .querySelectorAll("#setSwatches .swatch")
+          .forEach((el, idx) => el.classList.toggle("on", Object.keys(ACCENTS)[idx] === k));
+      }
+
+      /* Поле сообщения с переносом строк (Telegram-стиль): Enter — отправить, Shift+Enter — новая строка. */
+      function growBar(el) {
+        if (!el) return;
+        el.style.height = "auto";
+        el.style.height = Math.min(el.scrollHeight + 2, 140) + "px";
+      }
+      function resetBar(el) {
+        if (!el) return;
+        el.value = "";
+        el.style.height = "auto";
+      }
+      function barKey(e, send) {
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          send();
+        }
+      }
+
+      const ROLE = { client: "Клиент", bot: "Бот", manager: "Вы" };
+      const MNAME = { whatsapp: "WhatsApp", telegram: "Telegram", max: "MAX" };
+      // Иконка корзины — вместо эмодзи 🗑 (на части систем рисуется «непрогруженной» ч/б заглушкой).
+      const TRASH_ICON =
+        '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>';
+      const FILTERS = [
+        ["all", "Все"],
+        ["unread", "Непрочитанные"],
+      ];
+      let sel = null,
+        paused = false,
+        clientsSig = null,
+        msgsSig = null,
+        timer = null,
+        view = "chats",
+        msgText = {};
+      let optimisticEnter = false; // менеджер только что написал — держим «Вы в диалоге», пока сервер не подтвердит
+      let clients = [],
+        flt = "all",
+        seen = JSON.parse(localStorage.getItem("seen") || "{}"),
+        firstLoad = true;
+      function playBeep() {
+        try {
+          const a = new (window.AudioContext || window.webkitAudioContext)(),
+            o = a.createOscillator(),
+            g = a.createGain();
+          o.connect(g);
+          g.connect(a.destination);
+          o.frequency.value = 880;
+          g.gain.setValueAtTime(0.15, a.currentTime);
+          g.gain.exponentialRampToValueAtTime(0.001, a.currentTime + 0.3);
+          o.start();
+          o.stop(a.currentTime + 0.3);
+        } catch (e) {}
+      }
+      function isUnread(c) {
+        return c.last_sender === "client" && c.id !== sel && seen[c.id] !== c.last_time;
+      }
+
+      async function api(path, opts = {}) {
+        const r = await fetch(path, {
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          ...opts,
+        });
+        if (r.status === 401) {
+          showLogin();
+          throw new Error("unauth");
+        }
+        return r;
+      }
+      function esc(s) {
+        return (s || "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
+      }
+      // Подпись разделителя дат в диалоге: «Сегодня» / «Вчера» / «20 июня 2026»
+      function dateLabel(iso) {
+        const d = new Date(iso);
+        if (isNaN(d)) return "";
+        const t = new Date(),
+          y = new Date();
+        y.setDate(t.getDate() - 1);
+        const same = (a, b) => a.toDateString() === b.toDateString();
+        if (same(d, t)) return "Сегодня";
+        if (same(d, y)) return "Вчера";
+        return d.toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" });
+      }
+      function animateIn(el) {
+        if (!el) return;
+        el.classList.remove("anim");
+        void el.offsetWidth;
+        el.classList.add("anim");
+      }
+      function hhmm(iso) {
+        try {
+          return new Date(iso).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+        } catch (e) {
+          return "";
+        }
+      }
+
+      function showLogin() {
+        clearInterval(timer);
+        document.getElementById("app").style.display = "none";
+        document.getElementById("login").style.display = "flex";
+      }
+      let myRole = "manager";
+      function showApp(name) {
+        document.getElementById("login").style.display = "none";
+        document.getElementById("app").style.display = "flex";
+        document.getElementById("who").textContent = name;
+        renderFilters();
+        tick();
+        timer = setInterval(tick, 2000);
+        api("/api/dashboard/me")
+          .then((r) => r.json())
+          .then((d) => {
+            myRole = d.role;
+            document.getElementById("tabAdmin").style.display = d.role === "owner" ? "" : "none";
+          })
+          .catch(() => {});
+        loadBranding(); // общее оформление (гамма/название/иконка) с сервера
+      }
+      function showView(v) {
+        view = v;
+        for (const [t, k] of [
+          ["tabChats", "chats"],
+          ["tabOrders", "orders"],
+          ["tabBot", "bot"],
+          ["tabStats", "stats"],
+          ["tabAdmin", "admin"],
+        ])
+          document.getElementById(t).classList.toggle("on", v === k);
+        document.getElementById("vChats").style.display = v === "chats" ? "grid" : "none";
+        document.getElementById("vOrders").style.display = v === "orders" ? "block" : "none";
+        document.getElementById("vBot").style.display = v === "bot" ? "grid" : "none";
+        document.getElementById("vStats").style.display = v === "stats" ? "block" : "none";
+        document.getElementById("vAdmin").style.display = v === "admin" ? "block" : "none";
+        animateIn(
+          document.getElementById(
+            {
+              chats: "vChats",
+              orders: "vOrders",
+              bot: "vBot",
+              stats: "vStats",
+              admin: "vAdmin",
+            }[v],
+          ),
+        );
+        if (v === "orders") loadOrders();
+        if (v === "bot") loadTemplatesView();
+        if (v === "stats") loadAnalytics();
+        if (v === "admin") loadAdminView();
+      }
+
+      async function doLogin(e) {
+        e.preventDefault();
+        const err = document.getElementById("lerr");
+        err.textContent = "";
+        const r = await fetch("/api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
+          body: JSON.stringify({
+            username: document.getElementById("u").value,
+            password: document.getElementById("p").value,
+          }),
+        });
+        if (r.ok) {
+          showApp((await r.json()).username);
+        } else {
+          const d = await r.json().catch(() => ({}));
+          err.textContent = d.error || "Ошибка входа";
+        }
+      }
+      async function doLogout() {
+        await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" });
+        showLogin();
+      }
+
+      /* ---------- Диалоги ---------- */
+      async function tick() {
+        try {
+          await checkNewBookings(); // сигнал о новой брони работает на любой вкладке
+          if (view === "orders") await loadOrders();
+          if (view === "chats") {
+            await refreshClients();
+            if (sel !== null) {
+              await refreshMessages();
+            }
+          }
+          const c = document.getElementById("conn");
+          c.style.color = "var(--green)";
+          c.title = "На связи";
+        } catch (e) {
+          if (e.message !== "unauth") {
+            const c = document.getElementById("conn");
+            c.style.color = "var(--danger)";
+            c.title = "Нет связи";
+          }
+        }
+      }
+      /* ---------- Заказы (брони) + уведомление о новых бронях ---------- */
+      let ordFlt = "all",
+        seenBookings = JSON.parse(localStorage.getItem("seenBookings") || "null"),
+        ordersCache = [];
+      const ORD_FILTERS = [
+        ["all", "Все"],
+        ["booked", "Забронированы"],
+        ["completed", "Исполнены"],
+        ["canceled", "Отменены"],
+      ];
+      // Цвета статуса брони: забронирована — в цвет темы, завершена — зелёная, отменена — красная.
+      const STAT_COLORS = {
+        booked: "var(--primary)",
+        completed: "var(--green)",
+        canceled: "var(--danger)",
+      };
+      const SEL_STATUSES = [
+        ["booked", "забронирован"],
+        ["completed", "завершён"],
+        ["canceled", "отменён"],
+      ];
+      let ordersSig = null;
+      // На любой вкладке держим кэш броней свежим и сигналим звуком о новой брони.
+      async function checkNewBookings() {
+        const d = await (await api("/api/dashboard/orders")).json();
+        ordersCache = d.orders;
+        const ids = d.orders.map((o) => o.id);
+        if (seenBookings === null) {
+          // первый заход — просто запоминаем текущие, без ложного сигнала
+          seenBookings = ids;
+          localStorage.setItem("seenBookings", JSON.stringify(seenBookings));
+          return;
+        }
+        const fresh = d.orders.filter((o) => !seenBookings.includes(o.id));
+        if (fresh.length) {
+          playBeep();
+          for (const o of fresh) toast(`🆕 Новая бронь #${o.id} — ${o.client_name}`);
+          seenBookings = ids;
+          localStorage.setItem("seenBookings", JSON.stringify(seenBookings));
+        }
+      }
+      async function loadOrders(force) {
+        const d = await (await api("/api/dashboard/orders")).json();
+        ordersCache = d.orders;
+        // Не перерисовываем без изменений (иначе автообновление каждые 2с закрывало бы открытый список статусов)
+        const sig = JSON.stringify([
+          ordFlt,
+          d.orders.map((o) => [o.id, o.status, o.amount, o.description]),
+        ]);
+        if (!force && sig === ordersSig && !document.querySelector(".dd.open")) return;
+        if (document.querySelector(".dd.open") && !force) return;
+        ordersSig = sig;
+        document.getElementById("ordFilters").innerHTML = ORD_FILTERS.map(
+          ([k, l]) =>
+            `<button class="flt${k === ordFlt ? " on" : ""}" onclick="setOrdFilter('${k}')">${l}</button>`,
+        ).join("");
+        const box = document.getElementById("orders");
+        box.innerHTML = "";
+        const rows = d.orders.filter((o) => ordFlt === "all" || o.status === ordFlt);
+        if (!rows.length) {
+          box.innerHTML = '<div class="kbcard" style="color:var(--muted)">Заказов нет.</div>';
+          return;
+        }
+        for (const o of rows) {
+          const div = document.createElement("div");
+          div.className = "kbcard ordcard";
+          const scol = STAT_COLORS[o.status] || "var(--text)";
+          const opts = SEL_STATUSES.map(
+            ([k, l]) =>
+              `<div class="dd-opt" style="color:${STAT_COLORS[k]}" onclick="pickStatus(${o.id},'${k}')">${l}</div>`,
+          ).join("");
+          // Поля брони — каждое отдельной строкой «метка — значение». Пустые поля пропускаем.
+          const when = [o.date, o.time].filter(Boolean).join(", ");
+          const orow = (label, value) =>
+            value ? `<div class="orow"><span class="ok">${label}</span><span class="ov">${value}</span></div>` : "";
+          const fields =
+            orow("Объект", esc(o.place)) +
+            orow("Когда", esc(when)) +
+            orow("Гостей", esc(String(o.guests || ""))) +
+            orow("Сумма", `<b>${Math.round(o.amount)} ₽</b>`) +
+            orow(
+              "Создан",
+              `${hhmm(o.created_at)} · ${new Date(o.created_at).toLocaleDateString("ru-RU")}`,
+            );
+          div.innerHTML = `<div class="oinfo">
+        <div class="t">#${o.id} · ${esc(o.client_name)} <span class="obadge" style="color:${scol}">• ${esc(o.status_ru)}</span></div>
+        <div class="ofields">${fields || `<div class="s">${esc(o.description)}</div>`}</div>
+      </div>
+      <div class="oside">
+        <button class="obtn" onclick="openCard(${o.client_id})">👤 Карточка</button>
+        <button class="obtn" onclick="goToDialog(${o.client_id})">💬 К диалогу</button>
+        <div class="dd"><button class="dd-btn" style="color:${scol}" onclick="toggleDD(this)">${esc(o.status_ru)}</button>
+          <div class="dd-menu">${opts}</div></div>
+        <button class="obtn del" onclick="delOrder(${o.id})">Удалить</button>
+      </div>`;
+          box.appendChild(div);
+        }
+      }
+      function closeAllDD() {
+        document.querySelectorAll(".dd.open").forEach((x) => {
+          x.classList.remove("open");
+          const c = x.closest(".kbcard");
+          if (c) {
+            c.style.zIndex = "";
+            c.style.position = "";
+          }
+        });
+      }
+      function toggleDD(btn) {
+        const dd = btn.parentNode,
+          open = dd.classList.contains("open");
+        closeAllDD();
+        if (!open) {
+          dd.classList.add("open");
+          // поднимаем карточку над соседями, чтобы меню было поверх всего
+          const c = dd.closest(".kbcard");
+          if (c) {
+            c.style.position = "relative";
+            c.style.zIndex = "60";
+          }
+        }
+      }
+      document.addEventListener("click", (e) => {
+        if (!e.target.closest(".dd")) closeAllDD();
+      });
+      function pickStatus(id, status) {
+        closeAllDD();
+        changeOrderStatus(id, status);
+      }
+      async function changeOrderStatus(id, status) {
+        await api(`/api/dashboard/orders/${id}/status`, {
+          method: "PUT",
+          body: JSON.stringify({ status }),
+        });
+        loadOrders(true);
+      }
+      async function delOrder(id) {
+        if (!(await uiConfirm("Удалить заказ #" + id + "? Это действие нельзя отменить."))) return;
+        await api(`/api/dashboard/orders/${id}`, { method: "DELETE" });
+        loadOrders();
+      }
+      function goToDialog(clientId) {
+        showView("chats");
+        const c = clients.find((x) => x.id === clientId);
+        selectConv(clientId, (c && c.name) || "Клиент");
+      }
+      function setOrdFilter(k) {
+        ordFlt = k;
+        loadOrders();
+      }
+      function openOrdersCsv() {
+        showModal(`<h3>📊 Заказы (CSV / Excel)</h3>
+    <div class="s" style="color:var(--muted);margin-bottom:14px">Выгрузите заказы в файл или загрузите обновлённый. По ID заказ обновляется, новые строки создаются и привязываются к клиенту по имени.</div>
+    <div class="btnrow">
+      <a class="obtn" href="/api/dashboard/orders/export" onclick="closeModal()">📤 Экспорт</a>
+      <label class="obtn" style="cursor:pointer">📥 Импорт
+        <input type="file" accept=".csv,text/csv" style="display:none" onchange="importOrders(this);closeModal()"></label>
+    </div>
+    <div class="mrow"><button class="mini" onclick="closeModal()">Закрыть</button></div>`);
+      }
+      async function importOrders(input) {
+        const f = input.files[0];
+        if (!f) return;
+        const fd = new FormData();
+        fd.append("file", f);
+        const r = await fetch("/api/dashboard/orders/import", {
+          method: "POST",
+          credentials: "same-origin",
+          body: fd,
+        });
+        const d = await r.json().catch(() => ({}));
+        input.value = "";
+        if (r.ok) {
+          uiAlert(`Готово: добавлено ${d.added}, обновлено ${d.updated}, пропущено ${d.skipped}.`);
+          loadOrders(true);
+        } else uiAlert(d.error || "Ошибка импорта заказов");
+      }
+      function toast(text) {
+        let t = document.getElementById("toast");
+        if (!t) {
+          t = document.createElement("div");
+          t.id = "toast";
+          t.style.cssText =
+            "position:fixed;top:16px;right:16px;z-index:30;display:flex;flex-direction:column;gap:8px";
+          document.body.appendChild(t);
+        }
+        const el = document.createElement("div");
+        el.style.cssText =
+          "background:var(--green);color:#fff;padding:12px 16px;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.2);font-size:14px;font-weight:600";
+        el.textContent = text;
+        t.appendChild(el);
+        setTimeout(() => el.remove(), 8000);
+      }
+      async function refreshClients() {
+        const d = await (await api("/api/dashboard/clients")).json();
+        const sig = JSON.stringify(
+          d.clients.map((c) => [c.id, c.last_time, c.is_bot_paused, c.last_text]),
+        );
+        if (sig === clientsSig) return;
+        clientsSig = sig;
+        // Уведомление: новое непрочитанное сообщение от клиента
+        const newUnread = d.clients.some(
+          (c) => isUnread(c) && !clients.some((o) => o.id === c.id && o.last_time === c.last_time),
+        );
+        clients = d.clients;
+        if (newUnread && !firstLoad) playBeep();
+        firstLoad = false;
+        renderClients();
+      }
+      function renderClients() {
+        const q = (document.getElementById("q").value || "").toLowerCase().trim();
+        let unreadTotal = 0;
+        const list = document.getElementById("list");
+        list.innerHTML = "";
+        for (const c of clients) {
+          if (c.id === sel) {
+            seen[c.id] = c.last_time;
+          }
+          const un = isUnread(c);
+          if (un) unreadTotal++;
+          if (q && !(c.name || "").toLowerCase().includes(q)) continue;
+          if (flt === "unread" && !un) continue;
+          const div = document.createElement("div");
+          div.className = "conv" + (c.id === sel ? " sel" : "") + (un ? " unread" : "");
+          div.onclick = () => selectConv(c.id, c.name);
+          // в превью списка чатов не показываем эмодзи-микрофон у голосовых — только текст
+          const ltext = (c.last_text || "").replace(/^🎤\s*/, "");
+          const prev = ltext.slice(0, 32) + (ltext.length > 32 ? "…" : "");
+          const mt = MNAME[c.last_messenger]
+            ? `<span class="mtag">${MNAME[c.last_messenger]}</span>`
+            : "";
+          div.innerHTML = `<div class="dot" style="color:var(--primary)">●</div>
+      <div style="flex:1;min-width:0"><div class="nm"><span class="nm-name">${esc(c.name)}</span>${mt}</div><div class="pv">${esc(prev)}</div></div>
+      ${un ? '<div class="unr">●</div>' : ""}`;
+          list.appendChild(div);
+        }
+        document.title = (unreadTotal ? `(${unreadTotal}) ` : "") + APP_NAME;
+        const tc = document.getElementById("tabChats");
+        tc.innerHTML = "Диалоги" + (unreadTotal ? `<span class="cnt">${unreadTotal}</span>` : "");
+      }
+      function renderFilters() {
+        document.getElementById("filters").innerHTML = FILTERS.map(
+          ([k, l]) =>
+            `<button class="flt${k === flt ? " on" : ""}" onclick="setFilter('${k}')">${l}</button>`,
+        ).join("");
+      }
+      function setFilter(k) {
+        flt = k;
+        renderFilters();
+        renderClients();
+      }
+      async function selectConv(id, name) {
+        sel = id;
+        msgsSig = null;
+        optimisticEnter = false;
+        seen[id] = (clients.find((c) => c.id === id) || {}).last_time;
+        localStorage.setItem("seen", JSON.stringify(seen));
+        document.getElementById("title").textContent = name;
+        document.getElementById("vChats").classList.add("open");
+        renderClients();
+        await refreshMessages();
+      }
+      function backToList() {
+        document.getElementById("vChats").classList.remove("open");
+      }
+      async function refreshMessages() {
+        const d = await (await api(`/api/dashboard/clients/${sel}/messages`)).json();
+        const cl = JSON.parse(clientsSig || "[]").find((x) => x[0] === sel);
+        paused = cl ? cl[2] : false;
+        if (paused)
+          optimisticEnter = false; // сервер подтвердил вход — снимаем оптимистичный флаг
+        else if (optimisticEnter) paused = true; // подтверждения ещё нет — держим «Вы в диалоге»
+        const sig = JSON.stringify([sel, d.messages.length, d.messages.at(-1)?.time, paused]);
+        if (sig === msgsSig) return;
+        msgsSig = sig;
+        const chat = document.getElementById("chat");
+        chat.innerHTML = "";
+        // Склейка подряд идущих фото от одного отправителя: альбом приходит отдельными сообщениями,
+        // показываем его одним пузырём (как наши групповые отправки).
+        const groups = [];
+        msgText = {};
+        const isPh = (t) =>
+          t === "📷 Фото" || t === "🎤 Голосовое сообщение" || (t || "").startsWith("📎 "); // авто-заглушка вложения, не реальный текст
+        for (const m of d.messages) {
+          const media = m.media || [];
+          const prev = groups[groups.length - 1];
+          if (
+            prev &&
+            media.length &&
+            prev.media.length &&
+            prev.sender_type === m.sender_type &&
+            Math.abs(new Date(m.time) - new Date(prev.time)) < 10000 &&
+            !(m.text && !isPh(m.text)) // не склеиваем сообщение с собственным текстом (уведомление с фото) — иначе два уведомления слипнутся
+          ) {
+            prev.media = prev.media.concat(media);
+            prev.time = m.time;
+            prev.ids.push(m.id);
+            prev.reactions = prev.reactions.concat(m.reactions || []);
+            if (m.text && !isPh(m.text))
+              prev.text = (prev.text && !isPh(prev.text) ? prev.text + "\n" : "") + m.text;
+            continue;
+          }
+          groups.push({
+            sender_type: m.sender_type,
+            text: m.text,
+            time: m.time,
+            media: media.slice(),
+            ids: [m.id],
+            reactions: (m.reactions || []).slice(),
+          });
+        }
+        let lastDay = "";
+        for (const g of groups) {
+          // Разделитель дат: вставляем, когда сообщения переходят на новый день
+          const day = new Date(g.time).toDateString();
+          if (day !== lastDay) {
+            lastDay = day;
+            const sep = document.createElement("div");
+            sep.className = "daysep";
+            sep.innerHTML = `<span>${esc(dateLabel(g.time))}</span>`;
+            chat.appendChild(sep);
+          }
+          const row = document.createElement("div");
+          row.className = "row " + g.sender_type[0];
+          // Удаление доступно на ЛЮБОМ сообщении (клиент/бот/менеджер, текст/фото/файл);
+          // редактирование — только на собственном текстовом сообщении менеджера.
+          const mid = g.ids[0],
+            hasText = g.text && !isPh(g.text),
+            canEdit = g.sender_type === "manager" && g.ids.length === 1 && hasText;
+          if (hasText) msgText[mid] = g.text;
+          let acts =
+            `<div class="msgacts">` +
+            (canEdit ? `<button title="Изменить" onclick="editMsg(${mid})">✎</button>` : "") +
+            `<button class="del" title="Удалить" onclick="delMsg('${g.ids.join(",")}')">${TRASH_ICON}</button></div>`;
+          row.innerHTML =
+            acts +
+            // rich для исходящих (бот/менеджер) — рисуем разметку *жирный*/_курсив_/~подч~
+            // так же, как её увидит гость. Входящие от клиента — как есть (маркеров нет).
+            `<div class="bub">${bubbleInner(g.sender_type, g.text, g.time, g.media, g.reactions, g.sender_type !== "client")}</div>`;
+          chat.appendChild(row);
+        }
+        chat.scrollTop = chat.scrollHeight;
+        updateControls();
+      }
+      function updateControls() {
+        send.disabled = false;
+        document.getElementById("tplbtn").disabled = false;
+        document.getElementById("filelbl").classList.remove("dis");
+        document.getElementById("cardBtn").style.display = "inline-block";
+      }
+      /* ---------- Карточка клиента ---------- */
+      async function openCard(clientId) {
+        const id = clientId != null ? clientId : sel;
+        if (id === null || id === undefined) return;
+        const c = await (await api(`/api/dashboard/clients/${id}/card`)).json();
+        // Список броней клиента (раньше — заказы): номер, статус, состав, дата.
+        const bookings =
+          (c.orders || [])
+            .map(
+              (o) => `<div class="kbcard" style="margin:6px 0;padding:10px 12px">
+      <div style="display:flex;justify-content:space-between"><b>#${o.id}</b><span>${esc(o.status_ru)}</span></div>
+      <div class="s">${esc(o.description)}</div>
+      <div class="s">${new Date(o.created_at).toLocaleDateString("ru-RU")}</div></div>`,
+            )
+            .join("") || '<div class="s" style="color:var(--muted)">Броней нет.</div>';
+        showModal(`<h3 style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 14px">${esc(c.name)}${c.no_max ? `<span class="nomax-badge" title="У номера нет аккаунта MAX или он скрыт настройками приватности — сообщения не доставляются">⚠ нет MAX</span>` : ""}</h3>
+    <div style="display:flex;flex-direction:column;gap:3px">
+      <div class="s">Телефон: ${esc(c.phone || "—")}</div>
+      <div class="s">Клиент с: ${new Date(c.created_at).toLocaleDateString("ru-RU")}</div>
+      <div class="s">Бронирований: <b>${c.orders_count}</b></div>
+    </div>
+    <label style="margin-top:16px">📝 Внутренние заметки (видите только вы, клиенту не уходят)</label>
+    <textarea id="cl_notes" rows="3" placeholder="Например: постоянный гость, всегда берёт беседку №2, день рождения…">${esc(c.notes || "")}</textarea>
+    <div style="margin-top:6px"><button class="mini" onclick="saveNotes(${c.id})">Сохранить заметки</button><span class="saved" id="notesSaved"></span></div>
+    <label style="margin-top:12px">Бронирования клиента</label>${bookings}
+    <div class="mrow"><button class="add" onclick="closeModal()">Закрыть</button></div>`);
+      }
+      async function saveNotes(id) {
+        await api(`/api/dashboard/clients/${id}/notes`, {
+          method: "PUT",
+          body: JSON.stringify({ notes: val("cl_notes") }),
+        });
+        const s = document.getElementById("notesSaved");
+        if (s) {
+          s.textContent = "Сохранено";
+          setTimeout(() => (s.textContent = ""), 1500);
+        }
+      }
+      let pendingFiles = [];
+      function attachFile() {
+        for (const f of document.getElementById("cfile").files) {
+          if (pendingFiles.length >= 5) {
+            uiAlert("Можно прикрепить не более 5 файлов");
+            break;
+          }
+          pendingFiles.push(f);
+        }
+        document.getElementById("cfile").value = "";
+        renderFprev();
+        document.getElementById("msg").focus();
+      }
+      function renderFprev() {
+        const box = document.getElementById("fprev");
+        if (!pendingFiles.length) {
+          box.style.display = "none";
+          box.innerHTML = "";
+          document.getElementById("msg").placeholder = "Написать клиенту…";
+          return;
+        }
+        box.innerHTML = pendingFiles
+          .map((f, i) => {
+            const t = f.type.startsWith("image/")
+              ? `<img src="${URL.createObjectURL(f)}">`
+              : f.type.startsWith("video/")
+                ? `<video src="${URL.createObjectURL(f)}" muted></video>`
+                : `<div class="doc">📄</div>`;
+            return `<div class="fitem">${t}<button class="rm" onclick="rmFile(${i})" title="Убрать">✕</button></div>`;
+          })
+          .join("");
+        box.style.display = "flex";
+        document.getElementById("msg").placeholder = "Подпись (необязательно)…";
+      }
+      function rmFile(i) {
+        pendingFiles.splice(i, 1);
+        renderFprev();
+      }
+      function clearFile() {
+        pendingFiles = [];
+        document.getElementById("cfile").value = "";
+        renderFprev();
+      }
+      function openImg(u) {
+        const lv = document.getElementById("lbvideo");
+        lv.pause();
+        lv.removeAttribute("src");
+        lv.style.display = "none";
+        const li = document.getElementById("lbimg");
+        li.style.display = "";
+        li.src = u;
+        document.getElementById("lightbox").style.display = "flex";
+      }
+      function openVideo(u) {
+        const li = document.getElementById("lbimg");
+        li.style.display = "none";
+        li.removeAttribute("src");
+        const lv = document.getElementById("lbvideo");
+        lv.style.display = "";
+        lv.src = u;
+        document.getElementById("lightbox").style.display = "flex";
+        lv.play().catch(() => {});
+      }
+      function closeLightbox() {
+        const lv = document.getElementById("lbvideo");
+        lv.pause();
+        lv.removeAttribute("src"); // иначе видео продолжает грузиться/играть в фоне после закрытия
+        document.getElementById("lightbox").style.display = "none";
+      }
+      function openFile(u) {
+        window.open(u, "_blank", "noopener");
+      }
+      /* ---------- Плеер голосовых (в стиле Telegram, без нативных контролов) ---------- */
+      function fmtDur(s) {
+        if (!isFinite(s) || s < 0) s = 0;
+        s = Math.floor(s);
+        const m = Math.floor(s / 60);
+        return m + ":" + String(s % 60).padStart(2, "0");
+      }
+      function vDur(a) {
+        return isFinite(a.duration) && a.duration > 0 ? a.duration : 0;
+      }
+      function vAudio(el) {
+        return el.closest(".voice").querySelector("audio");
+      }
+      function vToggle(btn) {
+        const a = vAudio(btn);
+        if (a.paused) {
+          document.querySelectorAll(".voice audio").forEach((o) => {
+            if (o !== a) o.pause();
+          });
+          a.play();
+        } else a.pause();
+      }
+      function vState(a) {
+        a.closest(".voice").querySelector(".v-play").textContent = a.paused ? "▶" : "⏸";
+      }
+      function vProgress(a) {
+        if (a.dataset.fix === "1") return; // идёт замер длительности — не показываем мусорное время
+        const box = a.closest(".voice");
+        const d = vDur(a),
+          c = a.currentTime || 0;
+        box.querySelector(".v-fill").style.width = (d ? Math.min(100, (c / d) * 100) : 0) + "%";
+        box.querySelector(".v-time").textContent = fmtDur(c > 0 ? c : d);
+      }
+      // OGG из мессенджеров часто без длительности в заголовке (duration=Infinity) — форсим её
+      // вычисление однократной перемоткой в конец, иначе ломаются и таймер, и перемотка.
+      function vMeta(a) {
+        const box = a.closest(".voice");
+        if (!isFinite(a.duration) || a.duration <= 0) {
+          if (a.dataset.fix !== "1") {
+            a.dataset.fix = "1";
+            try {
+              a.currentTime = 1e101;
+            } catch (e) {}
+          }
+          return;
+        }
+        if (a.dataset.fix === "1") {
+          a.dataset.fix = "2";
+          a.currentTime = 0;
+        }
+        if (a.paused) box.querySelector(".v-time").textContent = fmtDur(a.duration);
+      }
+      function vEnded(a) {
+        const box = a.closest(".voice");
+        box.querySelector(".v-fill").style.width = "0%";
+        a.currentTime = 0;
+        box.querySelector(".v-play").textContent = "▶";
+        box.querySelector(".v-time").textContent = fmtDur(vDur(a));
+      }
+      // Перемотка кликом и перетаскиванием (зажал и ведёшь). setPointerCapture — чтобы события
+      // продолжали приходить, даже если палец/курсор ушёл за пределы полосы.
+      let vDrag = null;
+      function vSeekTo(a, bar, clientX) {
+        const d = vDur(a);
+        if (!d) return;
+        const r = bar.getBoundingClientRect();
+        const p = Math.min(1, Math.max(0, (clientX - r.left) / r.width));
+        a.currentTime = p * d;
+        vProgress(a);
+      }
+      function vPointerDown(e, bar) {
+        e.preventDefault();
+        vDrag = bar;
+        try {
+          bar.setPointerCapture(e.pointerId);
+        } catch (_) {}
+        vSeekTo(bar.closest(".voice").querySelector("audio"), bar, e.clientX);
+      }
+      function vPointerMove(e, bar) {
+        if (vDrag === bar) vSeekTo(bar.closest(".voice").querySelector("audio"), bar, e.clientX);
+      }
+      function vPointerUp(e, bar) {
+        if (vDrag === bar) vDrag = null;
+      }
+      function vSpeed(btn) {
+        const a = vAudio(btn);
+        const seq = [1, 1.5, 2];
+        let i = (seq.indexOf(a.playbackRate) + 1) % seq.length;
+        a.playbackRate = seq[i];
+        btn.textContent =
+          (Number.isInteger(seq[i]) ? seq[i] : seq[i].toString().replace(".", ",")) + "×";
+      }
+      /* ---------- Плеер видео (та же логика перемотки, что у голосовых; без нативных контролов) ---------- */
+      function vidBox(el) {
+        return el.closest(".vid");
+      }
+      function vidDur(v) {
+        return isFinite(v.duration) && v.duration > 0 ? v.duration : 0;
+      }
+      function vidToggle(el) {
+        const v = vidBox(el).querySelector("video");
+        if (v.paused) {
+          document.querySelectorAll(".vid video").forEach((o) => {
+            if (o !== v) o.pause();
+          });
+          v.play();
+        } else v.pause();
+      }
+      function vidState(v) {
+        vidBox(v).classList.toggle("playing", !v.paused);
+      }
+      function vidProgress(v) {
+        const box = vidBox(v);
+        const d = vidDur(v),
+          c = v.currentTime || 0;
+        box.querySelector(".vid-fill").style.width = (d ? Math.min(100, (c / d) * 100) : 0) + "%";
+        box.querySelector(".vid-time").textContent = fmtDur(c > 0 ? c : d);
+      }
+      function vidMeta(v) {
+        vidProgress(v);
+      }
+      function vidEnded(v) {
+        const box = vidBox(v);
+        box.classList.remove("playing");
+        box.querySelector(".vid-fill").style.width = "0%";
+        v.currentTime = 0;
+        box.querySelector(".vid-time").textContent = fmtDur(vidDur(v));
+      }
+      let vidDrag = null;
+      function vidSeekTo(v, bar, clientX) {
+        const d = vidDur(v);
+        if (!d) return;
+        const r = bar.getBoundingClientRect();
+        const p = Math.min(1, Math.max(0, (clientX - r.left) / r.width));
+        v.currentTime = p * d;
+        vidProgress(v);
+      }
+      function vidPointerDown(e, bar) {
+        e.preventDefault();
+        e.stopPropagation(); // иначе клик по полосе тоже переключит play/pause через .vid
+        vidDrag = bar;
+        try {
+          bar.setPointerCapture(e.pointerId);
+        } catch (_) {}
+        vidSeekTo(vidBox(bar).querySelector("video"), bar, e.clientX);
+      }
+      function vidPointerMove(e, bar) {
+        if (vidDrag === bar) vidSeekTo(vidBox(bar).querySelector("video"), bar, e.clientX);
+      }
+      function vidPointerUp(e, bar) {
+        if (vidDrag === bar) vidDrag = null;
+      }
+      function vidMute(btn) {
+        const v = vidBox(btn).querySelector("video");
+        v.muted = !v.muted;
+        btn.textContent = v.muted ? "🔇" : "🔊";
+      }
+      function vidFull(btn) {
+        // Раньше — нативный Fullscreen API. Теперь открываем тот же лайтбокс, что у фото:
+        // надёжнее (не зависит от прав/поддержки браузера) и привычно — «как у фото».
+        const v = vidBox(btn).querySelector("video");
+        openVideo(v.currentSrc || v.src);
+      }
+      // Иконка-обложка файла по расширению/имени
+      function fileIcon(name) {
+        const n = (name || "").toLowerCase();
+        if (/\.pdf$/.test(n)) return "📕";
+        if (/\.(xlsx?|csv)$/.test(n)) return "📊";
+        if (/\.(docx?|rtf|txt)$/.test(n)) return "📄";
+        if (/\.(zip|rar|7z)$/.test(n)) return "🗜️";
+        if (/\.(mp3|wav|ogg|m4a)$/.test(n)) return "🎵";
+        if (/\.(mp4|mov|avi|mkv)$/.test(n)) return "🎬";
+        return "📎";
+      }
+      function mediaHtml(media) {
+        if (!media || !media.length) return "";
+        // нормализуем: строки (старый формат) → объекты-картинки
+        const items = media.map((m) =>
+          typeof m === "string" ? { url: m, kind: "image", name: "" } : m,
+        );
+        const imgs = items.filter((m) => m.kind === "image");
+        const videos = items.filter((m) => m.kind === "video");
+        const audios = items.filter((m) => m.kind === "audio");
+        const files = items.filter(
+          (m) => m.kind !== "image" && m.kind !== "video" && m.kind !== "audio",
+        );
+        let h = "";
+        if (imgs.length)
+          h +=
+            `<div class="imgs">` +
+            imgs.map((m) => `<img src="${esc(m.url)}" onclick="openImg(this.src)">`).join("") +
+            `</div>`;
+        if (videos.length)
+          h +=
+            `<div class="videos">` +
+            videos
+              .map(
+                (m) =>
+                  `<div class="vid" onclick="vidToggle(this)"><video src="${esc(m.url)}" preload="metadata" playsinline onplay="vidState(this)" onpause="vidState(this)" ontimeupdate="vidProgress(this)" onloadedmetadata="vidMeta(this)" onended="vidEnded(this)"></video><button class="vid-big" aria-label="Играть">▶</button><div class="vid-bar-wrap" onclick="event.stopPropagation()"><div class="vid-bar" onpointerdown="vidPointerDown(event,this)" onpointermove="vidPointerMove(event,this)" onpointerup="vidPointerUp(event,this)"><div class="vid-fill"></div></div><span class="vid-time">0:00</span><button class="vid-mute" onclick="vidMute(this)" title="Звук">🔊</button><button class="vid-full" onclick="vidFull(this)" title="Во весь экран">⛶</button></div></div>`,
+              )
+              .join("") +
+            `</div>`;
+        if (audios.length)
+          h += audios
+            .map(
+              (m) =>
+                `<div class="voice"><button class="v-play" onclick="vToggle(this)" aria-label="Играть">▶</button><div class="v-bar" onpointerdown="vPointerDown(event,this)" onpointermove="vPointerMove(event,this)" onpointerup="vPointerUp(event,this)"><div class="v-fill"></div></div><span class="v-time">0:00</span><button class="v-speed" onclick="vSpeed(this)" title="Скорость воспроизведения">1×</button><audio preload="metadata" src="${esc(m.url)}" onplay="vState(this)" onpause="vState(this)" ontimeupdate="vProgress(this)" onloadedmetadata="vMeta(this)" ondurationchange="vMeta(this)" onended="vEnded(this)"></audio></div>`,
+            )
+            .join("");
+        if (files.length)
+          h += files
+            .map(
+              (
+                m,
+              ) => `<div class="filecard" onclick="openFile('${esc(m.url)}')" title="Открыть файл">
+      <span class="fc-ico">${fileIcon(m.name || m.url)}</span>
+      <span class="fc-name">${esc(m.name || "файл")}</span>
+      <span class="fc-open">↗</span></div>`,
+            )
+            .join("");
+        return h;
+      }
+      function reactionsHtml(reactions) {
+        if (!reactions || !reactions.length) return "";
+        // схлопываем одинаковые эмодзи в «эмодзи ×N»
+        const counts = {};
+        for (const r of reactions) {
+          const e = r.emoji || r;
+          if (e) counts[e] = (counts[e] || 0) + 1;
+        }
+        const chips = Object.entries(counts)
+          .map(([e, n]) => `<span class="react">${esc(e)}${n > 1 ? " " + n : ""}</span>`)
+          .join("");
+        return chips ? `<div class="reacts">${chips}</div>` : "";
+      }
+      // rich=true — рендерим markdown-разметку MAX (жирный/курсив/…); используется
+      // в предпросмотре шаблонов, чтобы оператор видел сообщение так же, как клиент.
+      function bubbleInner(sender, text, time, media, reactions, rich) {
+        let h = `<div class="meta">${ROLE[sender] || sender} · ${hhmm(time)}</div>`;
+        h += mediaHtml(media);
+        const ph =
+          text === "📷 Фото" ||
+          text === "🎬 Видео" ||
+          text === "🎤 Голосовое сообщение" ||
+          (text || "").startsWith("📎 ");
+        const hasAudio = (media || []).some((m) => m && m.kind === "audio");
+        if (text && !(media && media.length && ph)) {
+          // под голосовым показываем расшифровку отдельным блоком (а не как обычный текст)
+          h += hasAudio
+            ? `<div class="transcript">${esc(text)}</div>`
+            : rich
+              ? mdToHtml(text)
+              : esc(text);
+        }
+        h += reactionsHtml(reactions);
+        return h;
+      }
+      function appendOptimistic(text, media) {
+        const chat = document.getElementById("chat");
+        const row = document.createElement("div");
+        row.className = "row m";
+        row.innerHTML = `<div class="bub">${bubbleInner("manager", text, new Date().toISOString(), media, [], true)}</div>`;
+        chat.appendChild(row);
+        chat.scrollTop = chat.scrollHeight;
+      }
+      async function sendMsg() {
+        const i = document.getElementById("msg");
+        const t = i.value.trim();
+        if (sel === null) return;
+        const id = sel;
+        if (pendingFiles.length) {
+          const files = pendingFiles.slice(),
+            cap = t;
+          const optMedia = files.map((f) => ({
+            url: URL.createObjectURL(f),
+            kind: f.type.startsWith("image/")
+              ? "image"
+              : f.type.startsWith("video/")
+                ? "video"
+                : "file",
+            name: f.name,
+          }));
+          const phText =
+            optMedia[0].kind === "file"
+              ? "📎 " + optMedia[0].name
+              : optMedia[0].kind === "video"
+                ? "🎬 Видео"
+                : "📷 Фото";
+          appendOptimistic(cap || phText, optMedia); // мгновенно в панели
+          if (!paused) {
+            paused = true;
+            optimisticEnter = true;
+            updateControls();
+          } // визуально сразу «Вы в диалоге» — не ждём ответа сервера
+          resetBar(i);
+          clearFile();
+          const fd = new FormData();
+          files.forEach((f) => fd.append("files", f));
+          fd.append("caption", cap);
+          fetch(`/api/dashboard/clients/${id}/send-files`, {
+            method: "POST",
+            credentials: "same-origin",
+            body: fd,
+          })
+            .then((r) => {
+              if (!r.ok) uiAlert("Не удалось отправить фото");
+            })
+            .finally(() => {
+              clientsSig = msgsSig = null;
+              tick();
+            });
+          return;
+        }
+        if (!t) return;
+        appendOptimistic(t);
+        resetBar(i); // мгновенно в панели, сеть — следом
+        if (!paused) {
+          paused = true;
+          updateControls();
+        } // визуально сразу «Вы в диалоге» — не ждём ответа сервера
+        api(`/api/dashboard/clients/${id}/send`, {
+          method: "POST",
+          body: JSON.stringify({ text: t }),
+        })
+          .then(() => {
+            clientsSig = msgsSig = null;
+            tick();
+          })
+          .catch(() => {});
+      }
+
+      /* ---------- Редактирование/удаление своих сообщений ---------- */
+      function editMsg(id) {
+        const cur = msgText[id] || "";
+        showModal(`<h3>Изменить сообщение</h3>
+    <label>Текст сообщения</label><textarea id="em_text" rows="4">${esc(cur)}</textarea>
+    <div class="s" style="color:var(--muted);margin-top:4px">Изменение применится и в мессенджере клиента (если поддерживается).</div>
+    <div class="mrow"><button class="mini" onclick="closeModal()">Отмена</button>
+    <button class="add" onclick="saveMsg(${id})">Сохранить</button></div>`);
+        document.getElementById("em_text").focus();
+      }
+      async function saveMsg(id) {
+        const t = val("em_text").trim();
+        if (!t) {
+          uiAlert("Текст не может быть пустым");
+          return;
+        }
+        const r = await api(`/api/dashboard/messages/${id}`, {
+          method: "PUT",
+          body: JSON.stringify({ text: t }),
+        });
+        closeModal();
+        if (!r.ok) {
+          uiAlert("Не удалось изменить сообщение");
+          return;
+        }
+        msgsSig = null;
+        refreshMessages();
+      }
+      async function delMsg(ids) {
+        if (
+          !(await uiConfirm(
+            "Удалить это сообщение? Оно исчезнет из панели и из чата клиента (если поддерживается).",
+          ))
+        )
+          return;
+        const list = String(ids).split(",").filter(Boolean);
+        let ok = true;
+        for (const id of list) {
+          const r = await api(`/api/dashboard/messages/${id}`, { method: "DELETE" });
+          if (!r.ok) ok = false;
+        }
+        if (!ok) {
+          uiAlert("Не удалось удалить сообщение");
+          return;
+        }
+        msgsSig = null;
+        refreshMessages();
+      }
+
+      /* ---------- Шаблоны быстрых ответов ---------- */
+      function getTpl() {
+        return JSON.parse(localStorage.getItem("tpl") || "[]");
+      }
+      function syncTplBtn() {
+        const t = document.getElementById("tplbtn");
+        if (t)
+          t.classList.toggle("on", document.getElementById("tplbox").style.display === "block");
+      }
+      function toggleTpl() {
+        const b = document.getElementById("tplbox");
+        if (b.style.display === "block") {
+          b.style.display = "none";
+          syncTplBtn();
+          return;
+        }
+        const name = (clients.find((c) => c.id === sel) || {}).name || "";
+        const items =
+          getTpl()
+            .map(
+              (t, i) =>
+                `<div class="ti"><div class="tx" onclick="useTpl(${i})"><b>${esc(t.title)}</b>${esc(t.text)}</div>` +
+                `<span class="tact" onclick="openTpl(${i})" title="Изменить">✎</span>` +
+                `<span class="tact" onclick="delTpl(${i})" title="Удалить">${TRASH_ICON}</span></div>`,
+            )
+            .join("") || '<div class="ti" style="color:var(--muted)">Шаблонов нет</div>';
+        b.innerHTML = items + `<div class="tadd" onclick="openTpl()">＋ Новый шаблон</div>`;
+        b.style.display = "block";
+        b.dataset.name = name;
+        syncTplBtn();
+      }
+      function useTpl(i) {
+        const t = getTpl()[i];
+        const name = document.getElementById("tplbox").dataset.name || "";
+        const m = document.getElementById("msg");
+        m.value = t.text.replace(/\{имя\}/g, name).replace(/\{name\}/g, name);
+        growBar(m);
+        document.getElementById("tplbox").style.display = "none";
+        syncTplBtn();
+        m.focus();
+      }
+      function openTpl(i) {
+        document.getElementById("tplbox").style.display = "none";
+        syncTplBtn();
+        const e = i != null ? getTpl()[i] : { title: "", text: "" };
+        showModal(`<h3>${i != null ? "Изменить шаблон" : "Новый шаблон быстрого ответа"}</h3>
+    <label>Имя шаблона</label><input class="fld" id="t_title" value="${esc(e.title)}" placeholder="Например: Приветствие">
+    <label>Текст шаблона</label><textarea id="t_text" rows="4" placeholder="Текст ответа. Используйте {имя} — подставится имя клиента.">${esc(e.text)}</textarea>
+    <div class="mrow"><button class="mini" onclick="closeModal()">Отмена</button>
+    <button class="add" onclick="saveTpl(${i != null ? i : -1})">Сохранить</button></div>`);
+        document.getElementById("t_title").focus();
+      }
+      function saveTpl(i) {
+        const title = val("t_title").trim(),
+          text = val("t_text");
+        if (!title || !text.trim()) {
+          uiAlert("Заполните имя и текст шаблона");
+          return;
+        }
+        const a = getTpl();
+        if (i >= 0) a[i] = { title, text };
+        else a.push({ title, text });
+        localStorage.setItem("tpl", JSON.stringify(a));
+        closeModal();
+      }
+      async function delTpl(i) {
+        if (!(await uiConfirm("Удалить шаблон?"))) return;
+        const a = getTpl();
+        a.splice(i, 1);
+        localStorage.setItem("tpl", JSON.stringify(a));
+        toggleTpl();
+        toggleTpl();
+      }
+      document.addEventListener("click", (e) => {
+        const b = document.getElementById("tplbox");
+        if (b && b.style.display === "block" && !b.contains(e.target) && e.target.id !== "tplbtn") {
+          b.style.display = "none";
+          syncTplBtn();
+        }
+      });
+
+      /* ---------- Шаблоны сообщений + предпросмотр отправки ----------
+         Вкладка «Бот» в этом проекте — не диалоговый ассистент, а редактор уведомлений,
+         которые бот шлёт клиенту в MAX на события брони из Restoplace:
+           created   — «Подтверждение» (бронь принята),
+           updated   — «Изменение»     (бронь изменена),
+           cancelled — «Отмена»        (бронь отменена/удалена).
+         Слева правим текст шаблона, справа сразу видим, как сообщение придёт клиенту.
+         Шаблоны храним в localStorage — панель работает автономно, без отдельного API. */
+
+      // Типы уведомлений: ключ события ↔ человекочитаемое название (для вкладок слева и справа).
+      const TPL_TYPES = [
+        ["created", "Подтверждение"],
+        ["updated", "Изменение"],
+        ["cancelled", "Отмена"],
+      ];
+      // Поля брони, которые можно подставлять в шаблон (показываются в подсказке «Доступные поля»).
+      const TPL_FIELDS = [
+        ["{имя}", "имя гостя"],
+        ["{объект}", "беседка/столик и зона"],
+        ["{дата}", "дата брони"],
+        ["{время}", "время брони"],
+        ["{гостей}", "число гостей"],
+        ["{номер}", "номер брони"],
+      ];
+      // Кнопки форматирования над редактором шаблона. Мы оборачиваем текст WhatsApp-
+      // подобными маркерами (*жирный* _курсив_ ~подчёркнутый~). MAX сам markdown НЕ
+      // понимает: маркеры вырезает и превращает в формат MAX-сайдкар (kapuchino-api,
+      // parse_markup в max_service.py) — там же задан маппинг mark → тип MAX
+      // (STRONG/EMPHASIZED/UNDERLINE). Тот же mark использует и предпросмотр (mdToHtml).
+      // Меняете набор форматов здесь — синхронизируйте _MARKUP в сайдкаре.
+      //   glyph — что нарисовано на кнопке, css — как стилизовать саму подпись.
+      const TPL_FORMATS = [
+        { key: "bold", mark: "*", tag: "b", glyph: "Ж", css: "font-weight:800", title: "Жирный" },
+        { key: "italic", mark: "_", tag: "i", glyph: "К", css: "font-style:italic", title: "Курсив" },
+        { key: "underline", mark: "~", tag: "u", glyph: "Ч", css: "text-decoration:underline", title: "Подчёркнутый" },
+      ];
+      // Демонстрационные данные брони для примера справа (как в README реального уведомления).
+      const TPL_SAMPLE = {
+        "{имя}": "Юлия",
+        "{объект}": "Беседка №2, Основной зал",
+        "{дата}": "27.06.2026",
+        "{время}": "13:00–14:00",
+        "{гостей}": "3",
+        "{номер}": "101",
+      };
+      // Шаблоны по умолчанию (они же — «Вставить пример» для каждого типа).
+      const TPL_DEFAULTS = {
+        created: `✅ Бронирование принято!
+
+👤 {имя}
+🏡 {объект}
+📅 {дата}
+🕐 {время}
+👥 Гостей: {гостей}
+🔖 Бронь №{номер}
+
+✨ Во время отдыха на базе вы можете:
+• попариться в бане на дровах
+• арендовать беседку с мангалом
+• порыбачить на пруду и взять лодку напрокат
+
+Будем рады помочь — просто напишите нам!`,
+        updated: `✏️ Бронирование изменено
+
+👤 {имя}
+🏡 {объект}
+📅 {дата}
+🕐 {время}
+👥 Гостей: {гостей}
+🔖 Бронь №{номер}`,
+        cancelled: `❌ Бронирование отменено
+
+👤 {имя}
+🏡 {объект}
+📅 {дата}
+🕐 {время}
+🔖 Бронь №{номер}
+
+Если это ошибка — напишите нам, поможем восстановить.`,
+      };
+
+      let tplType = "created"; // какой шаблон редактируем слева; пример справа всегда показывает его же
+      let tplDraft = loadTemplates(); // рабочая копия текстов (правки до нажатия «Сохранить»)
+
+      // Локальный фолбэк: шаблоны из localStorage (кэш), недостающие — примерами.
+      // Серверные шаблоны (источник истины) подтягивает loadTemplatesView().
+      function loadTemplates() {
+        let saved = {};
+        try {
+          saved = JSON.parse(localStorage.getItem("limeTemplates") || "{}");
+        } catch (e) {}
+        const out = {};
+        for (const [k] of TPL_TYPES) out[k] = saved[k] != null ? saved[k] : TPL_DEFAULTS[k];
+        return out;
+      }
+      // Полная отрисовка вкладки (вызывается при открытии «Бот»).
+      // Шаблоны грузим с сервера — именно ИХ рендерит бэкенд при отправке клиенту,
+      // поэтому в панели должно быть видно ровно то, что уйдёт гостю.
+      async function loadTemplatesView() {
+        renderTplTabs();
+        renderTplFormatBar();
+        renderTplFields();
+        loadNotifyPhoto();
+        tplDraft = loadTemplates(); // стартовая база: кэш браузера / примеры
+        try {
+          const r = await api("/api/dashboard/templates");
+          if (r.ok) {
+            const d = await r.json();
+            const saved = (d && d.saved) || {};
+            let needPush = false;
+            for (const [k] of TPL_TYPES) {
+              const serverVal = saved[k];
+              const serverCustom = serverVal != null && serverVal !== TPL_DEFAULTS[k];
+              if (serverCustom) {
+                // На сервере осмысленный (не дефолтный) текст — он и уходит клиенту.
+                tplDraft[k] = serverVal;
+              } else if (tplDraft[k] != null && tplDraft[k] !== TPL_DEFAULTS[k]) {
+                // Сервер пуст или хранит дефолт, а в браузере есть НАШ текст — значит
+                // он просто не доехал до сервера. Переносим, чтобы бэкенд слал именно его.
+                needPush = true;
+              }
+            }
+            if (needPush) {
+              const templates = {};
+              for (const [k] of TPL_TYPES) templates[k] = tplDraft[k];
+              await api("/api/dashboard/templates", {
+                method: "PUT",
+                body: JSON.stringify({ templates }),
+              });
+            }
+            localStorage.setItem("limeTemplates", JSON.stringify(tplDraft));
+          }
+        } catch (e) {}
+        // Единственная отрисовка — уже по актуальным (серверным) данным, без гонки.
+        const ta = document.getElementById("tplBody");
+        ta.value = tplDraft[tplType];
+        autoGrow(ta);
+        renderPreview();
+      }
+      function renderTplTabs() {
+        document.getElementById("tplTabs").innerHTML = TPL_TYPES.map(
+          ([k, l]) =>
+            `<button class="flt${k === tplType ? " on" : ""}" onclick="selectTplType('${k}')">${l}</button>`,
+        ).join("");
+      }
+      // Подпись над примером — какой тип уведомления сейчас показан (всегда = выбранному слева).
+      function updatePreviewLabel() {
+        const el = document.getElementById("previewLabel");
+        if (!el) return;
+        const t = TPL_TYPES.find((x) => x[0] === tplType);
+        el.textContent = t ? t[1] : "";
+      }
+      function renderTplFields() {
+        document.getElementById("tplFields").innerHTML = TPL_FIELDS.map(
+          ([f, d]) => `<li><b class="k">${f}</b> — ${d}</li>`,
+        ).join("");
+      }
+      // Рисуем панель кнопок форматирования над текстом шаблона.
+      // onmousedown/preventDefault — чтобы клик по кнопке не сбрасывал выделение в textarea.
+      function renderTplFormatBar() {
+        const bar = document.getElementById("tplFormatBar");
+        if (!bar) return;
+        bar.innerHTML = TPL_FORMATS.map(
+          // esc(glyph): у моно-кнопки глиф «</>» — без экранирования браузер съест его как тег.
+          (f) =>
+            `<button type="button" class="fmtbtn" title="${f.title}" onmousedown="event.preventDefault()" onclick="applyFormat('${f.key}')"><span style="${f.css}">${esc(f.glyph)}</span></button>`,
+        ).join("");
+      }
+      // Оборачивает выделенный в редакторе текст маркерами формата — или снимает их,
+      // если выделение уже обёрнуто (кнопка работает как переключатель). Без выделения
+      // ставит пару маркеров и кладёт курсор между ними, чтобы сразу печатать внутри.
+      function applyFormat(key) {
+        const fmt = TPL_FORMATS.find((f) => f.key === key);
+        if (!fmt) return;
+        const ta = document.getElementById("tplBody");
+        const m = fmt.mark;
+        const val = ta.value;
+        const start = ta.selectionStart;
+        const end = ta.selectionEnd;
+        let inner = val.slice(start, end);
+        // Уже обёрнуто? Возможны два случая: маркеры снаружи выделения или внутри него.
+        const wrappedOutside =
+          val.slice(start - m.length, start) === m && val.slice(end, end + m.length) === m;
+        const wrappedInside =
+          inner.length >= 2 * m.length && inner.startsWith(m) && inner.endsWith(m);
+
+        let next, selFrom, selTo;
+        if (wrappedOutside) {
+          next = val.slice(0, start - m.length) + inner + val.slice(end + m.length);
+          selFrom = start - m.length;
+          selTo = selFrom + inner.length;
+        } else if (wrappedInside) {
+          inner = inner.slice(m.length, inner.length - m.length);
+          next = val.slice(0, start) + inner + val.slice(end);
+          selFrom = start;
+          selTo = start + inner.length;
+        } else {
+          next = val.slice(0, start) + m + inner + m + val.slice(end);
+          selFrom = start + m.length;
+          selTo = selFrom + inner.length;
+        }
+        ta.value = next;
+        ta.setSelectionRange(selFrom, selTo);
+        ta.focus();
+        autoGrow(ta);
+        onTemplateInput(); // синхронизируем черновик и живой предпросмотр
+      }
+      // Переключение редактируемого типа: сохраняем текущие правки в черновик и подхватываем другой.
+      function selectTplType(k) {
+        tplDraft[tplType] = document.getElementById("tplBody").value;
+        tplType = k;
+        renderTplTabs();
+        const ta = document.getElementById("tplBody");
+        ta.value = tplDraft[tplType];
+        autoGrow(ta);
+        renderPreview();
+        loadNotifyPhoto(); // у каждого типа своё фото
+      }
+      // Правка текста — обновляем черновик и сразу живой предпросмотр.
+      function onTemplateInput() {
+        tplDraft[tplType] = document.getElementById("tplBody").value;
+        renderPreview();
+      }
+      // Подставляем демо-данные брони на места {полей}; неизвестное поле → прочерк «—».
+      function fillTemplate(text) {
+        return (text || "").replace(/\{[^}]+\}/g, (m) => (TPL_SAMPLE[m] != null ? TPL_SAMPLE[m] : "—"));
+      }
+      // Markdown-разметка MAX → безопасный HTML для предпросмотра. Текст СНАЧАЛА
+      // экранируем (esc), и только потом добавляем свои <b>/<i>/…, поэтому чужой тег
+      // из шаблона внедрить нельзя. Разметка однострочная и невложенная — шаблоны
+      // короткие, так предсказуемее; незакрытый одиночный маркер остаётся символом
+      // (ровно так же его увидит и клиент).
+      function mdToHtml(text) {
+        let h = esc(text);
+        for (const f of TPL_FORMATS) {
+          const m = f.mark.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); // маркер в regex-безопасном виде
+          const re = new RegExp(m + "(?=\\S)([^\\n" + m + "]*?\\S)" + m, "g");
+          h = h.replace(re, `<${f.tag}>$1</${f.tag}>`);
+        }
+        return h;
+      }
+      // Рисуем сообщение пузырём бота — так, как его увидит гость в MAX (с форматированием).
+      function renderPreview() {
+        const box = document.getElementById("tplPreview");
+        if (!box) return;
+        updatePreviewLabel();
+        const text = fillTemplate(tplDraft[tplType] || "");
+        // Фото типа (если задано) показываем над текстом — как гость увидит в MAX.
+        const media = notifyPhotoUrl ? [{ url: notifyPhotoUrl, kind: "image" }] : [];
+        box.innerHTML = `<div class="daysep"><span>${esc(TPL_SAMPLE["{дата}"])}</span></div>
+      <div class="row b"><div class="bub">${bubbleInner("bot", text, new Date().toISOString(), media, [], true)}</div></div>`;
+      }
+      async function saveTemplate() {
+        tplDraft[tplType] = document.getElementById("tplBody").value;
+        localStorage.setItem("limeTemplates", JSON.stringify(tplDraft));
+        const s = document.getElementById("tplSaved");
+        // Сохраняем на сервер — отсюда бэкенд берёт текст для отправки клиенту.
+        const templates = {};
+        for (const [k] of TPL_TYPES) templates[k] = tplDraft[k];
+        try {
+          const r = await api("/api/dashboard/templates", {
+            method: "PUT",
+            body: JSON.stringify({ templates }),
+          });
+          s.textContent = r.ok ? "Сохранено" : "Сохранено локально (сервер недоступен)";
+        } catch (e) {
+          s.textContent = "Сохранено локально (сервер недоступен)";
+        }
+        setTimeout(() => (s.textContent = ""), 1800);
+        renderPreview();
+      }
+      // Подставить готовый рекомендуемый текст для выбранного типа.
+      function fillTemplateExample() {
+        const ta = document.getElementById("tplBody");
+        ta.value = TPL_DEFAULTS[tplType];
+        tplDraft[tplType] = ta.value;
+        autoGrow(ta);
+        ta.focus();
+        renderPreview();
+      }
+
+      /* ---------- Фото к уведомлению (одно общее, например логотип) ----------
+         Бот прикладывает его к сообщению о брони. Файл лежит на сервере, здесь
+         только загрузка/замена/удаление и превью. */
+      // URL фото текущего типа уведомления — чтобы показать его и в примере справа
+      // (renderPreview) ровно так, как гость увидит: картинка над текстом.
+      let notifyPhotoUrl = null;
+      // Показываем текущее состояние: есть фото → превью + «Убрать», нет → только «Загрузить».
+      function renderNotifyPhoto(url) {
+        notifyPhotoUrl = url || null;
+        const img = document.getElementById("notifyPhotoPreview");
+        const rm = document.getElementById("notifyPhotoRemove");
+        const label = document.getElementById("notifyPhotoBtnLabel");
+        const btns = document.getElementById("notifyPhotoBtns");
+        if (url) {
+          img.src = url + "?t=" + Date.now(); // сбиваем кэш при замене
+          img.style.display = "block";
+          rm.style.display = "";
+          btns.style.gridTemplateColumns = "1fr 1fr"; // две равные кнопки под фото
+          label.textContent = "Заменить фото";
+        } else {
+          img.removeAttribute("src");
+          img.style.display = "none";
+          rm.style.display = "none";
+          btns.style.gridTemplateColumns = "1fr"; // без фото — только «Загрузить» на всю ширину
+          label.textContent = "＋ Загрузить фото";
+        }
+        renderPreview(); // фото поменялось — обновляем пример справа
+      }
+      // Фото своё для каждого типа уведомления — работаем с текущим выбранным (tplType).
+      function updateNotifyPhotoHint() {
+        const hint = document.getElementById("notifyPhotoHint");
+        if (!hint) return;
+        const t = TPL_TYPES.find((x) => x[0] === tplType);
+        hint.textContent = `Фото для уведомления «${t ? t[1] : ""}» — бот приложит его к сообщению этого типа.`;
+      }
+      async function loadNotifyPhoto() {
+        updateNotifyPhotoHint();
+        try {
+          const r = await api(`/api/dashboard/notify-photo?kind=${tplType}`);
+          if (r.ok) renderNotifyPhoto((await r.json()).url);
+        } catch (e) {}
+      }
+      async function uploadNotifyPhoto(input) {
+        const file = input.files && input.files[0];
+        if (!file) return;
+        const saved = document.getElementById("notifyPhotoSaved");
+        const fd = new FormData();
+        fd.append("file", file);
+        try {
+          // headers:{} — убираем дефолтный JSON-заголовок, чтобы браузер выставил multipart.
+          const r = await api(`/api/dashboard/notify-photo?kind=${tplType}`, {
+            method: "POST",
+            body: fd,
+            headers: {},
+          });
+          if (r.ok) {
+            renderNotifyPhoto((await r.json()).url);
+            saved.textContent = "Сохранено";
+          } else {
+            saved.textContent = (await r.json().catch(() => ({}))).detail || "Не удалось загрузить";
+          }
+        } catch (e) {
+          saved.textContent = "Не удалось загрузить";
+        }
+        input.value = ""; // чтобы повторный выбор того же файла снова сработал
+        setTimeout(() => (saved.textContent = ""), 1800);
+      }
+      async function removeNotifyPhoto() {
+        const t = TPL_TYPES.find((x) => x[0] === tplType);
+        if (!(await uiConfirm(`Убрать фото из уведомления «${t ? t[1] : ""}»?`))) return;
+        try {
+          await api(`/api/dashboard/notify-photo?kind=${tplType}`, { method: "DELETE" });
+        } catch (e) {}
+        renderNotifyPhoto(null);
+      }
+      /* ---------- Аналитика ---------- */
+      // Какие метрики можно показать на гистограмме «активность за 14 дней»
+      const STAT_METRICS = [
+        ["bookings", "Брони", "шт.", "Сколько броней создано в этот день."],
+        [
+          "clients",
+          "Клиенты",
+          "чел.",
+          "Сколько новых гостей забронировало впервые в этот день.",
+        ],
+        [
+          "notifications",
+          "Уведомления",
+          "шт.",
+          "Сколько уведомлений отправлено клиентам в MAX в этот день.",
+        ],
+        ["cancellations", "Отмены", "шт.", "Сколько броней отменено в этот день."],
+      ];
+      let statMetric = "bookings",
+        statData = null;
+      async function loadAnalytics() {
+        const d = await (await api("/api/dashboard/analytics")).json();
+        statData = d;
+        const t = d.totals;
+        const cards = [
+          ["Брони", t.bookings],
+          ["Новые клиенты", t.clients],
+          ["Подтверждений", t.confirmations],
+          ["Изменений", t.updates],
+          ["Отмен", t.cancellations],
+          ["Уведомлений", t.notifications],
+          ["Доставлено", t.delivered_pct + " %"],
+        ];
+        document.getElementById("statCards").innerHTML = cards
+          .map(
+            ([l, v], i) =>
+              `<div class="kbcard" style="flex:1;min-width:140px;text-align:center;animation:fadeUp .4s ease backwards;animation-delay:${(i * 0.05).toFixed(2)}s">
+       <div style="font-size:24px;font-weight:700;color:var(--primary)">${v}</div>
+       <div class="s" style="color:var(--muted)">${l}</div></div>`,
+          )
+          .join("");
+        renderChart();
+        renderFunnel();
+        document.getElementById("topProducts").innerHTML = d.top_products.length
+          ? d.top_products
+              .map(
+                (p) =>
+                  `<div class="s" style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--line)"><span>${esc(p.name)}</span><b>${p.count} брон.</b></div>`,
+              )
+              .join("")
+          : '<div class="s" style="color:var(--muted)">Пока нет броней.</div>';
+      }
+      function setStatMetric(k) {
+        statMetric = k;
+        renderChart();
+      }
+      function renderChart() {
+        if (!statData) return;
+        const m = STAT_METRICS.find((x) => x[0] === statMetric);
+        const days = statData.by_day,
+          vals = days.map((x) => x[statMetric] || 0);
+        const max = Math.max(1, ...vals),
+          total = vals.reduce((a, b) => a + b, 0);
+        const tabs = STAT_METRICS.map(
+          ([k, l]) =>
+            `<button class="mbtn${k === statMetric ? " on" : ""}" onclick="setStatMetric('${k}')">${l}</button>`,
+        ).join("");
+        const bars = days
+          .map((x, i) => {
+            const v = vals[i],
+              h = Math.round((v / max) * 150);
+            const lab = v || "";
+            // Столбик выезжает первым (growUp), число появляется ПОСЛЕ — с задержкой на длительность роста.
+            const barDelay = (i * 0.03).toFixed(2),
+              numDelay = (i * 0.03 + 0.5).toFixed(2);
+            return `<div style="flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;gap:4px" title="${x.day}: ${v} ${m[2]}">
+        <div style="font-size:11px;color:var(--text);font-weight:600;height:15px;animation:fadeUp .3s ease backwards;animation-delay:${numDelay}s">${lab}</div>
+        <div style="width:72%;max-width:36px;background:linear-gradient(180deg,var(--primary),var(--primary-d));border-radius:7px 7px 0 0;height:${h}px;min-height:${v ? 3 : 0}px;transform-origin:bottom;animation:growUp .5s cubic-bezier(.4,1.2,.5,1) backwards;animation-delay:${barDelay}s"></div>
+        <div style="font-size:10px;color:var(--muted)">${x.day}</div></div>`;
+          })
+          .join("");
+        document.getElementById("chartDays").innerHTML =
+          `<div class="metric-tabs">${tabs}</div>
+     <div class="s" style="color:var(--muted);margin-bottom:10px">${m[3]} Всего за 14 дней: <b>${total + " " + m[2]}</b></div>
+     <div style="display:flex;align-items:flex-end;gap:6px;height:185px;padding-top:6px">${bars}</div>`;
+      }
+      // Гармоничная палитра из цвета темы: соседние оттенки «по кругу» (разные тона, но в одной гамме).
+      function hexToHsl(hex) {
+        let c = hex.replace("#", "");
+        if (c.length === 3)
+          c = c
+            .split("")
+            .map((x) => x + x)
+            .join("");
+        const r = parseInt(c.slice(0, 2), 16) / 255,
+          g = parseInt(c.slice(2, 4), 16) / 255,
+          b = parseInt(c.slice(4, 6), 16) / 255;
+        const mx = Math.max(r, g, b),
+          mn = Math.min(r, g, b),
+          d = mx - mn;
+        let h = 0;
+        if (d) {
+          if (mx === r) h = ((g - b) / d) % 6;
+          else if (mx === g) h = (b - r) / d + 2;
+          else h = (r - g) / d + 4;
+          h *= 60;
+          if (h < 0) h += 360;
+        }
+        const l = (mx + mn) / 2,
+          s = d ? d / (1 - Math.abs(2 * l - 1)) : 0;
+        return { h, s: s * 100, l: l * 100 };
+      }
+      function accentPalette(n) {
+        // Берём УЖЕ применённый --primary (его applyAccent выставляет до перекраски) — это единственный
+        // источник истины, не зависящий от порядка записи в localStorage.
+        let base =
+          getComputedStyle(document.documentElement).getPropertyValue("--primary").trim() ||
+          "#D6336C";
+        const { h, s, l } = hexToHsl(base);
+        const span = 46; // узкий разброс тонов — оттенки близки, гамма получается спокойной
+        const out = [];
+        for (let i = 0; i < n; i++) {
+          const t = n <= 1 ? 0 : i / (n - 1) - 0.5; // -0.5..0.5
+          const hh = (((h + t * span) % 360) + 360) % 360;
+          const ll = Math.min(66, Math.max(46, l + (i - (n - 1) / 2) * 4)); // мягкая разница в светлоте
+          const ss = Math.min(52, Math.max(30, s * 0.62)); // приглушаем насыщенность — без «кричащих» цветов
+          out.push(`hsl(${Math.round(hh)} ${Math.round(ss)}% ${Math.round(ll)}%)`);
+        }
+        return out;
+      }
+      // Перекрасить уже отрисованные шкалы воронки под текущую тему/гамму (без повторной анимации ширины).
+      function recolorFunnel() {
+        const bars = document.querySelectorAll("#funnel .fbar");
+        if (!bars.length) return;
+        const COL = accentPalette(bars.length);
+        bars.forEach((b, i) => (b.style.background = COL[i] || "var(--primary)"));
+      }
+      function renderFunnel() {
+        const f = statData.funnel,
+          max = Math.max(1, ...f.map((s) => s.count));
+        const COL = accentPalette(f.length);
+        // Этап: название слева, шкала по центру, затем число (в колонке фикс. ширины — выровнено по всем
+        // строкам) и сразу справа от него процент.
+        document.getElementById("funnel").innerHTML = f
+          .map((s, i) => {
+            const pct = Math.round((s.count / max) * 100);
+            const conv =
+              i > 0 && f[0].count
+                ? `<span style="color:var(--muted);font-weight:400">(${Math.round((s.count / f[0].count) * 100)}%)</span>`
+                : "";
+            return `<div style="display:flex;align-items:center;gap:10px;margin:9px 0">
+      <span class="s" style="width:120px;flex-shrink:0">${esc(s.stage)}</span>
+      <div style="flex:1;background:var(--chip);border-radius:8px;height:18px;overflow:hidden">
+        <div class="fbar" data-w="${pct}" style="height:100%;width:0;background:${COL[i] || "var(--primary)"};border-radius:8px;transition:width .7s cubic-bezier(.4,1,.5,1)"></div></div>
+      <div style="width:104px;flex-shrink:0;display:flex;align-items:baseline;gap:6px">
+        <b style="min-width:30px;text-align:left">${s.count}</b>${conv}</div></div>`;
+          })
+          .join("");
+        // запускаем рост шкал на следующий кадр (плавная анимация ширины)
+        requestAnimationFrame(() =>
+          document
+            .querySelectorAll("#funnel .fbar")
+            .forEach((b) => (b.style.width = b.dataset.w + "%")),
+        );
+      }
+
+      /* ---------- Управление ---------- */
+      async function loadAdminView() {
+        loadStatus();
+        loadBotSettings();
+        loadAdmins();
+        loadLoginLog();
+        loadAlerts();
+      }
+      // Приводит техническое сообщение об ошибке к опрятному виду для журнала:
+      // убирает скобочные уточнения, дампы в угловых/фигурных/квадратных скобках,
+      // кавычки-репры и лишние пробелы. Полный текст остаётся в title при наведении.
+      function prettyAlert(s) {
+        return String(s || "")
+          .replace(/\s*\([^)]*\)/g, "")
+          .replace(/<[^>]*>/g, "")
+          .replace(/[{}[\]<>]/g, "")
+          .replace(/['"`]+/g, "")
+          .replace(/\s+/g, " ")
+          .trim();
+      }
+      async function loadAlerts() {
+        const d = await (await api("/api/dashboard/alerts")).json();
+        const badge = document.getElementById("alertsBadge");
+        badge.innerHTML = d.unseen
+          ? `<span class="tag" style="color:#fff;background:var(--danger)">${d.unseen} новых</span>`
+          : "";
+        const box = document.getElementById("alertsList");
+        box.innerHTML = d.alerts.length
+          ? d.alerts
+              .map((a) => {
+                const clean = prettyAlert(a.message);
+                const full = `${a.source}: ${a.message}`;
+                return `<div class="s" title="${esc(full)}" style="display:flex;gap:8px;padding:5px 0;border-bottom:1px solid var(--line)">
+        <span style="color:var(--danger);flex-shrink:0">●</span>
+        <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><b>${esc(a.source)}</b> · ${esc(clean)}</span>
+        <span style="color:var(--muted);white-space:nowrap;flex-shrink:0">${hhmm(a.created_at)} ${new Date(a.created_at).toLocaleDateString("ru-RU")}</span></div>`;
+              })
+              .join("")
+          : '<div class="s" style="color:var(--muted)">Сбоев нет — всё работает штатно. ✅</div>';
+        if (d.unseen) api("/api/dashboard/alerts/seen", { method: "POST" }).catch(() => {}); // открыл журнал → гасим счётчик
+      }
+      async function clearAlerts() {
+        if (!(await uiConfirm("Очистить журнал сбоев?"))) return;
+        await api("/api/dashboard/alerts/clear", { method: "POST" });
+        loadAlerts();
+        loadStatus();
+      }
+      async function loadStatus() {
+        const box = document.getElementById("statusLamps");
+        // Проверка реальная (живые запросы к сервисам) — покажем, что идёт проверка
+        box.innerHTML = `<div class="s" style="color:var(--muted);padding:4px 0">Проверяем связь с системами…</div>`;
+        const d = await (await api("/api/dashboard/status")).json();
+        box.innerHTML = d.items
+          .map((i) => {
+            const col = i.ok ? "var(--green)" : "var(--danger)";
+            return `<div class="s" style="display:flex;align-items:center;gap:8px;padding:4px 0">
+       <span style="color:${col};font-size:12px">●</span>
+       <span style="flex:1">${esc(i.name)}</span>
+       <span style="color:${col}">${esc(i.note)}</span></div>`;
+          })
+          .join("");
+      }
+      async function loadBotSettings() {
+        const s = await (await api("/api/dashboard/bot-settings")).json();
+        document.getElementById("bs_enabled").checked = s.enabled;
+        // Какие типы уведомлений отправлять (created/updated/cancelled).
+        // Бэкенд может прислать массив notify_types — по умолчанию включены все.
+        const types = s.notify_types || ["created", "updated", "cancelled"];
+        document.getElementById("bs_notify_created").checked = types.includes("created");
+        document.getElementById("bs_notify_updated").checked = types.includes("updated");
+        document.getElementById("bs_notify_cancelled").checked = types.includes("cancelled");
+        document.getElementById("bs_owner_tg").value = s.owner_telegram || "";
+      }
+      async function saveBotSettings() {
+        // Собираем список включённых типов уведомлений из галочек.
+        const notify_types = [];
+        if (document.getElementById("bs_notify_created").checked) notify_types.push("created");
+        if (document.getElementById("bs_notify_updated").checked) notify_types.push("updated");
+        if (document.getElementById("bs_notify_cancelled").checked) notify_types.push("cancelled");
+        const body = {
+          enabled: document.getElementById("bs_enabled").checked,
+          notify_types,
+          // Тестовый режим убран из интерфейса — бот всегда отправляет реально.
+          dry_run: false,
+          owner_telegram: document.getElementById("bs_owner_tg").value.trim(),
+        };
+        await api("/api/dashboard/bot-settings", { method: "PUT", body: JSON.stringify(body) });
+        const s = document.getElementById("bsSaved");
+        s.textContent = "Сохранено";
+        setTimeout(() => (s.textContent = ""), 1800);
+        loadStatus();
+      }
+      const ROLE_RU = { owner: "Владелец", manager: "Менеджер" };
+      let adminsCache = [];
+      async function loadAdmins() {
+        const d = await (await api("/api/dashboard/admins")).json();
+        adminsCache = d.admins;
+        document.getElementById("adminsList").innerHTML = d.admins
+          .map(
+            (a) =>
+              `<div style="display:flex;align-items:center;gap:8px;padding:8px 2px;min-height:46px;border-bottom:1px solid var(--line)">
+       <span style="flex:1;min-width:0;font-size:14px;overflow:hidden;text-overflow:ellipsis">${esc(a.username)} <span class="tag">${ROLE_RU[a.role] || a.role}</span></span>
+       <button class="ic" title="Изменить логин, пароль, роль" onclick="openAdminForm(${a.id})">✎</button>
+       <button class="ic del" title="Удалить" onclick="delAdmin(${a.id})">${TRASH_ICON}</button></div>`,
+          )
+          .join("");
+      }
+      async function delAdmin(id) {
+        if (!(await uiConfirm("Удалить администратора?"))) return;
+        const r = await api(`/api/dashboard/admins/${id}`, { method: "DELETE" });
+        if (!r.ok) {
+          const e = await r.json().catch(() => ({}));
+          uiAlert(e.error || "Ошибка");
+        }
+        loadAdmins();
+      }
+      function openAdminForm(id) {
+        const a = id != null ? adminsCache.find((x) => x.id === id) : null;
+        const roleSel = (r) => `<div class="dd" id="roleDD">
+      <input type="hidden" id="a_role" value="${r}">
+      <button type="button" class="dd-btn" style="width:100%" onclick="toggleDD(this)">${ROLE_RU[r] || "Менеджер"}</button>
+      <div class="dd-menu" style="width:100%">
+        <div class="dd-opt${r === "manager" ? " on" : ""}" onclick="pickRole('manager')">Менеджер</div>
+        <div class="dd-opt${r === "owner" ? " on" : ""}" onclick="pickRole('owner')">Владелец</div>
+      </div></div>`;
+        showModal(`<h3>${a ? "Изменить администратора" : "Новый администратор"}</h3>
+    <label>Логин</label><input class="fld" id="a_user" value="${a ? esc(a.username) : ""}">
+    <label>Пароль ${a ? "(оставьте пустым, чтобы не менять)" : "(мин. 6 символов)"}</label>
+    <input class="fld" id="a_pwd" type="password" placeholder="${a ? "••••••" : ""}">
+    <label>Роль</label>${roleSel(a ? a.role : "manager")}
+    <div class="mrow"><button class="mini" onclick="closeModal()">Отмена</button>
+    <button class="add" onclick="saveAdmin(${a ? a.id : 0})">${a ? "Сохранить" : "Создать"}</button></div>
+    <div style="height:12px"></div>`);
+        document.getElementById("a_user").focus();
+      }
+      function pickRole(v) {
+        document.getElementById("a_role").value = v;
+        document.querySelector("#roleDD .dd-btn").textContent = ROLE_RU[v];
+        document
+          .querySelectorAll("#roleDD .dd-opt")
+          .forEach((o) => o.classList.toggle("on", o.textContent.trim() === ROLE_RU[v]));
+        closeAllDD();
+      }
+      async function saveAdmin(id) {
+        const username = val("a_user").trim(),
+          password = val("a_pwd"),
+          role = val("a_role");
+        if (!username) {
+          uiAlert("Укажите логин");
+          return;
+        }
+        if (!id && password.length < 6) {
+          uiAlert("Пароль — минимум 6 символов");
+          return;
+        }
+        if (id && password && password.length < 6) {
+          uiAlert("Пароль — минимум 6 символов");
+          return;
+        }
+        let r;
+        if (id) {
+          const body = { username, role };
+          if (password) body.password = password;
+          r = await api(`/api/dashboard/admins/${id}`, {
+            method: "PUT",
+            body: JSON.stringify(body),
+          });
+        } else {
+          r = await api("/api/dashboard/admins", {
+            method: "POST",
+            body: JSON.stringify({ username, password, role }),
+          });
+        }
+        if (r.ok) {
+          closeModal();
+          loadAdmins();
+        } else {
+          const e = await r.json().catch(() => ({}));
+          uiAlert(e.error || "Ошибка");
+        }
+      }
+      async function loadLoginLog() {
+        const d = await (await api("/api/dashboard/login-log")).json();
+        document.getElementById("loginLog").innerHTML = d.logs.length
+          ? d.logs
+              .slice(0, 5)
+              .map(
+                (
+                  l,
+                ) => `<div class="s" style="display:flex;align-items:center;gap:8px;padding:7px 2px;border-bottom:1px solid var(--line)">
+        <span style="width:16px;text-align:center;flex-shrink:0;color:${l.ok ? "var(--green)" : "var(--danger)"}">${l.ok ? "✓" : "✕"}</span>
+        <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis">${esc(l.username)}</span>
+        <span style="color:var(--muted);flex-shrink:0">${esc(l.ip)} · ${hhmm(l.created_at)} ${new Date(l.created_at).toLocaleDateString("ru-RU")}</span></div>`,
+              )
+              .join("")
+          : '<div class="s" style="color:var(--muted)">Записей нет.</div>';
+      }
+
+      /* ---------- Инструкция по панели ---------- */
+      function openHelp() {
+        const k = (s) => `<b class="k">${s}</b>`;
+        const li = (arr) => "<ul>" + arr.map((x) => `<li>${x}</li>`).join("") + "</ul>";
+        showModal(`<h3>📖 Инструкция по панели</h3>
+    <div class="help-doc">
+      <div class="s" style="margin-bottom:14px">
+        Бот автоматически уведомляет гостей в MAX о бронированиях из Restoplace: подтверждает
+        новую бронь, сообщает об изменении и об отмене. Панель — чтобы видеть переписку и брони,
+        настраивать тексты уведомлений и следить за работой систем.
+      </div>
+      <section>
+        <h4>💬 Диалоги</h4>
+        ${li([
+          `Вся переписка с гостями в одном месте. Сверху — поиск по имени и фильтры (все / непрочитанные), у имени видна метка мессенджера и счётчик непрочитанных.`,
+          `Бот шлёт уведомления сам. Если ответите гостю вручную, бот в этом чате замолкает и вернётся сам примерно через 10 минут тишины — отдельных кнопок для этого больше нет.`,
+          `Наведите курсор на сообщение: ✎ — изменить текст или подпись, ${TRASH_ICON} — удалить. Удалять можно любое сообщение (наши стираются и у гостя, входящие — только в панели).`,
+          `${k("📎")} — прикрепить до 5 фото или файлов (подпись идёт к последнему). ${k("⚡")} — шаблоны быстрых ответов, ${k("{имя}")} подставит имя гостя.`,
+          `${k("👤 Карточка")} — телефон, дата первого обращения, заметки и список бронирований гостя.`,
+        ])}
+      </section>
+      <section>
+        <h4>🧾 Заказы</h4>
+        ${li([
+          `Все брони со статусами: забронированы / исполнены / отменены — фильтруйте кнопками сверху.`,
+          `Поля брони показаны по строкам. Меняйте статус, открывайте карточку гостя, переходите к диалогу, удаляйте запись.`,
+          `${k("📊 Импорт / экспорт")} — выгрузка и загрузка броней в CSV. На новую бронь — звук и всплывашка на любой вкладке.`,
+        ])}
+      </section>
+      <section>
+        <h4>🤖 Бот</h4>
+        ${li([
+          `Слева — шаблоны сообщений для трёх событий: ${k("Подтверждение")}, ${k("Изменение")}, ${k("Отмена")}. Выберите тип и отредактируйте текст.`,
+          `Данные брони подставляются на места полей в фигурных скобках: ${k("{имя}")}, ${k("{объект}")}, ${k("{дата}")}, ${k("{время}")}, ${k("{гостей}")}, ${k("{номер}")}.`,
+          `Справа — ${k("Пример отправки")}: сразу видно, как сообщение придёт гостю в MAX для выбранного слева типа. ${k("✨ Рекомендуемый текст")} подставит готовый шаблон.`,
+        ])}
+      </section>
+      <section>
+        <h4>📊 Аналитика</h4>
+        ${li([
+          `Ключевые показатели: брони, новые гости, подтверждения, изменения, отмены, уведомления, доля доставленных.`,
+          `График активности за 14 дней с переключением метрики, топ объектов по бронированиям и воронка уведомлений.`,
+        ])}
+      </section>
+      <section>
+        <h4>⚙ Управление <span class="own">только владелец</span></h4>
+        ${li([
+          `Состояние систем: живая проверка связи с Restoplace, шлюзом kapuchino-api и MAX — «подключён» (зелёный) или «не подключён» (красный). Ниже — журнал сбоёв.`,
+          `Рубильник отправки уведомлений, выбор отправляемых событий и тестовый режим (только лог, без реальной отправки).`,
+          `Дублирование важного (новые брони, сбои) себе в Telegram, управление админами и ролями, журнал входов, резервная копия базы.`,
+        ])}
+      </section>
+      <div class="tip">💡 Клик по логотипу обновляет панель. Точка-индикатор слева снизу показывает связь с сервером: зелёная — есть, красная — нет.</div>
+    </div>
+    <div class="mrow"><button class="add" onclick="closeModal()">Понятно</button></div>`);
+        document.getElementById("mbox").style.width = "640px";
+      }
+
+      /* ---------- Modal helpers ---------- */
+      // Авто-рост textarea: поле растягивается в высоту под весь текст, а не прокручивается внутри.
+      function autoGrow(el) {
+        if (!el) return;
+        el.style.height = "auto";
+        el.style.height = el.scrollHeight + 2 + "px";
+      }
+      function autoGrowAll(root) {
+        (root || document).querySelectorAll("textarea").forEach(autoGrow);
+      }
+      document.addEventListener("input", (e) => {
+        if (e.target && e.target.tagName === "TEXTAREA" && !e.target.closest(".bar"))
+          autoGrow(e.target);
+      });
+      function showModal(html) {
+        const b = document.getElementById("mbox");
+        b.style.width = "";
+        b.innerHTML = html;
+        document.getElementById("modal").style.display = "flex";
+        autoGrowAll(b);
+      }
+      function closeModal() {
+        document.getElementById("modal").style.display = "none";
+      }
+      function val(id) {
+        return document.getElementById(id).value;
+      }
+
+      /* Окна подтверждения/уведомления в стиле панели (замена нативных confirm/alert) */
+      let _confirmRes = null;
+      function _closeConfirm(v) {
+        document.getElementById("confirm").style.display = "none";
+        const r = _confirmRes;
+        _confirmRes = null;
+        if (r) r(v);
+      }
+      function uiConfirm(text, opts = {}) {
+        return new Promise((res) => {
+          _confirmRes = res;
+          const ok = opts.ok || "Удалить";
+          document.getElementById("cbox").innerHTML =
+            `<div style="font-size:15px;line-height:1.5;margin-bottom:18px;white-space:pre-wrap">${esc(text)}</div>
+     <div class="mrow"><button class="mini" onclick="_closeConfirm(false)">Отмена</button>
+     <button class="add" onclick="_closeConfirm(true)">${esc(ok)}</button></div>`;
+          document.getElementById("confirm").style.display = "flex";
+        });
+      }
+      function uiAlert(text) {
+        return new Promise((res) => {
+          _confirmRes = res;
+          document.getElementById("cbox").innerHTML =
+            `<div style="font-size:15px;line-height:1.5;margin-bottom:18px;white-space:pre-wrap">${esc(text)}</div>
+     <div class="mrow"><button class="add" onclick="_closeConfirm(true)">Понятно</button></div>`;
+          document.getElementById("confirm").style.display = "flex";
+        });
+      }
+      // Клик мимо окна НЕ закрывает (чтобы не потерять введённое). Закрытие — только «Отмена» или Esc.
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") {
+          if (document.getElementById("confirm").style.display === "flex") _closeConfirm(false);
+          else if (document.getElementById("modal2").style.display === "flex") closeCatPicker();
+          else closeModal();
+        }
+      });
+
+      (async () => {
+        try {
+          const r = await fetch("/api/auth/me", { credentials: "same-origin" });
+          if (r.ok) showApp((await r.json()).username);
+          else showLogin();
+        } catch (e) {
+          showLogin();
+        }
+      })();
+    </script>
+  </body>
+</html>

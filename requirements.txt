@@ -1,0 +1,9 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+httpx==0.28.1
+pydantic==2.10.4
+pydantic-settings==2.7.1
+python-multipart==0.0.20  # загрузка вложений и импорт CSV в админ-панели
+
+# dev/test
+pytest==8.3.4

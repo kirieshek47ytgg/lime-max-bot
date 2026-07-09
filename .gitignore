@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.env
+*.log
+state/
+.pytest_cache/
+
+# Рантайм админ-панели
+bot_database.db
+*.db
+*.db-wal
+*.db-shm
+media/
+.idea/
+.vscode/
+.DS_Store
