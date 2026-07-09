@@ -1280,9 +1280,9 @@
       .flt.on:hover {
         color: #fff;
       }
-      /* Панель форматирования над редактором шаблона (жирный/курсив/зачёркнутый/
-         моноширинный). Символы разметки уходят клиенту как есть — рендерит их
-         сам MAX; кнопки лишь оборачивают выделенный текст. См. TPL_FORMATS в JS. */
+      /* Панель форматирования над редактором шаблона (жирный/курсив/подчёркнутый).
+         Символы разметки уходят клиенту как есть — рендерит их сам MAX;
+         кнопки лишь оборачивают выделенный текст. См. TPL_FORMATS в JS. */
       .fmtbar {
         display: flex;
         gap: 6px;
@@ -2357,7 +2357,7 @@
             <!-- Переключатель типа уведомления: подтверждение / изменение / отмена -->
             <div class="filters even" id="tplTabs" style="margin-bottom: 12px"></div>
             <!-- Форматирование: выделите текст в поле ниже и нажмите кнопку —
-                 выделение обернётся разметкой (жирный/курсив/зачёркнутый/моно). -->
+                 выделение обернётся разметкой (жирный/курсив/подчёркнутый). -->
             <div class="fmtbar" id="tplFormatBar"></div>
             <textarea
               id="tplBody"
@@ -2457,8 +2457,8 @@
                     <li>
                       Выделите слово и нажмите
                       <b style="color: var(--text)">Ж</b> / <i>К</i> /
-                      <s>З</s> / <code style="font-family: ui-monospace, Consolas, monospace">&lt;/&gt;</code>
-                      — жирный, курсив, зачёркнутый или моноширинный текст.
+                      <u>Ч</u>
+                      — жирный, курсив или подчёркнутый текст.
                     </li>
                     <li>Если поля в брони нет, бот подставит прочерк «—».</li>
                   </ul>
@@ -3498,7 +3498,7 @@
           div.className = "conv" + (c.id === sel ? " sel" : "") + (un ? " unread" : "");
           div.onclick = () => selectConv(c.id, c.name);
           // в превью списка чатов не показываем эмодзи-микрофон у голосовых — только текст
-          const ltext = (c.last_text || "").replace(/^🎤\s*/, "");
+          const ltext = stripMarkup((c.last_text || "").replace(/^🎤\s*/, ""));
           const prev = ltext.slice(0, 32) + (ltext.length > 32 ? "…" : "");
           const mt = MNAME[c.last_messenger]
             ? `<span class="mtag">${MNAME[c.last_messenger]}</span>`
@@ -4431,6 +4431,18 @@
           const m = f.mark.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); // маркер в regex-безопасном виде
           const re = new RegExp(m + "(?=\\S)([^\\n" + m + "]*?\\S)" + m, "g");
           h = h.replace(re, `<${f.tag}>$1</${f.tag}>`);
+        }
+        return h;
+      }
+      // Снимает парные маркеры разметки, оставляя чистый текст. Для превью в списке
+      // чатов: там форматирование не нужно, а сырые * _ ~ мозолят глаза. Работает с
+      // сырой строкой (esc навешивается уже на результат в renderClients).
+      function stripMarkup(text) {
+        let h = text;
+        for (const f of TPL_FORMATS) {
+          const m = f.mark.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          const re = new RegExp(m + "(?=\\S)([^\\n" + m + "]*?\\S)" + m, "g");
+          h = h.replace(re, "$1");
         }
         return h;
       }
