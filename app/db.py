@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS clients (
   is_bot_paused INTEGER DEFAULT 0,
   paused_until  TEXT,
   no_max        INTEGER DEFAULT 0,   -- 1, если у номера нет аккаунта MAX (или скрыт приватностью)
+  max_chat_id   TEXT,                 -- резолвнутый chatId MAX (для сопоставления ВХОДЯЩИХ с клиентом)
   created_at    TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS messages (
@@ -160,6 +161,8 @@ def _migrate() -> None:
         chave = {r["name"] for r in c.execute("PRAGMA table_info(clients)").fetchall()}
         if "no_max" not in chave:
             c.execute("ALTER TABLE clients ADD COLUMN no_max INTEGER DEFAULT 0")
+        if "max_chat_id" not in chave:
+            c.execute("ALTER TABLE clients ADD COLUMN max_chat_id TEXT")
 
 
 # --------------------------------------------------------------------------- #
@@ -333,6 +336,30 @@ def upsert_client(phone: str, name: str | None) -> int:
         cur = c.execute(
             "INSERT INTO clients(phone, name, created_at) VALUES(?,?,?)",
             (phone, name or "Гость", now_iso()),
+        )
+        return int(cur.lastrowid)
+
+
+def set_client_max_chat(client_id: int, max_chat_id: str | None) -> None:
+    """Запоминает резолвнутый chatId MAX у клиента — по нему матчим входящие."""
+    if not max_chat_id:
+        return
+    with connect() as c:
+        c.execute("UPDATE clients SET max_chat_id=? WHERE id=?", (str(max_chat_id), client_id))
+
+
+def get_or_create_by_max_chat(max_chat_id: str, name: str | None) -> int:
+    """Клиент по chatId MAX; если такого нет — создаём. Телефон синтетический
+    (max:<chatId>), т.к. номер отправителя MAX не отдаёт. Как только этот же
+    человек оставит бронь, отправка уведомления проставит настоящему клиенту
+    max_chat_id — и последующие входящие уйдут уже к нему."""
+    with connect() as c:
+        row = c.execute("SELECT id FROM clients WHERE max_chat_id=?", (str(max_chat_id),)).fetchone()
+        if row:
+            return int(row["id"])
+        cur = c.execute(
+            "INSERT INTO clients(phone, name, max_chat_id, created_at) VALUES(?,?,?,?)",
+            (f"max:{max_chat_id}", name or "Гость MAX", str(max_chat_id), now_iso()),
         )
         return int(cur.lastrowid)
 

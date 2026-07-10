@@ -116,14 +116,84 @@ async def health() -> dict:
     }
 
 
+_INCOMING_LABEL = {
+    "image": "📷 Фото", "video": "🎬 Видео", "voice": "🎤 Голосовое",
+    "audio": "🎵 Аудио", "document": "📎 Файл", "sticker": "🌟 Стикер",
+    "location": "📍 Локация", "contact": "👤 Контакт",
+}
+
+
+async def _save_incoming_media(media_url: str, mtype: str) -> dict | None:
+    """Качает вложение входящего с шлюза (Bearer) в media/ и отдаёт запись для
+    панели. Любую ошибку глушим — само сообщение сохраняем в любом случае."""
+    import secrets as _secrets
+
+    import httpx
+
+    try:
+        headers = {"Authorization": f"Bearer {settings.gateway_token}"}
+        async with httpx.AsyncClient(timeout=settings.http_timeout) as c:
+            r = await c.get(media_url, headers=headers)
+            r.raise_for_status()
+            data = r.content
+        ext = Path(media_url.split("?")[0]).suffix or ""
+        name = f"in_{_secrets.token_hex(8)}{ext}"
+        media_dir = Path(settings.media_dir)
+        media_dir.mkdir(parents=True, exist_ok=True)
+        (media_dir / name).write_bytes(data)
+        kind = "image" if mtype == "image" else "video" if mtype == "video" else "file"
+        return {"url": f"/media/{name}", "kind": kind, "name": name}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("⚠  Не удалось скачать входящее вложение: %s", exc)
+        return None
+
+
 @app.post("/api/webhook")
 async def gateway_incoming(request: Request) -> JSONResponse:
-    """Заглушка для входящих уведомлений шлюза (incomingMessage webhook).
+    """Входящие/исходящие сообщения от шлюза kapuchino-api.
 
-    На этапе 1 мы их не обрабатываем — просто отвечаем 200, чтобы шлюз
-    не повторял доставку и не засорял лог 404-ми.
+    Формат: { event, channel, from, fromName, type, text, fromMe, mediaUrl?, … }.
+    event: incomingMessage (написал клиент) | outgoingMessage (владелец ответил
+    вручную со своего телефона/приложения MAX). Поле from — это chatId MAX, НЕ
+    телефон, поэтому клиента ищем по сохранённому max_chat_id (его проставляет
+    отправка уведомления/ответа менеджера). Если такого нет — заводим клиента по
+    chatId (сойдётся с бронью, как только тому же человеку уйдёт уведомление).
     """
-    log.debug("Входящее уведомление шлюза получено и проигнорировано.")
+    try:
+        body = await request.json()
+    except (ValueError, TypeError):
+        return JSONResponse({"status": "bad json"}, status_code=400)
+
+    event = body.get("event")
+    if event not in ("incomingMessage", "outgoingMessage"):
+        return JSONResponse({"status": "ignored"})  # test-пинги шлюза и прочее
+
+    chat = str(body.get("from") or "").strip()
+    # Групповые чаты (chatId с ведущим «-») к броням не относятся — пропускаем.
+    if not chat or chat.startswith("-"):
+        return JSONResponse({"status": "ignored"})
+
+    name = (body.get("fromName") or "").strip() or None
+    client_id = db.get_or_create_by_max_chat(chat, name)
+
+    mtype = str(body.get("type") or "text")
+    text = body.get("text") or ""
+    media = None
+    if body.get("mediaUrl"):
+        rec = await _save_incoming_media(str(body["mediaUrl"]), mtype)
+        media = [rec] if rec else None
+    if not text and not media:
+        text = _INCOMING_LABEL.get(mtype, "📎 Вложение")
+
+    # incomingMessage — писал клиент; outgoingMessage — владелец ответил сам с телефона.
+    sender = "client" if event == "incomingMessage" else "manager"
+    db.add_message(
+        client_id, sender, text,
+        kind=None if sender == "client" else "manager",
+        delivered=True, media=media,
+        channel=str(body.get("channel") or settings.channel), gateway_chat_id=chat,
+    )
+    log.info("📥 %s от %s (chatId=%s)", event, name or "—", chat)
     return JSONResponse({"status": "ok"})
 
 
@@ -332,6 +402,10 @@ async def restoplace_webhook(
         # Сообщение реально ушло — значит аккаунт MAX есть, снимаем пометку.
         if delivered:
             db.set_client_no_max(client_id, False)
+            # Запоминаем chatId MAX получателя — по нему сматчим будущие ВХОДЯЩИЕ.
+            # Только при отправке реальному гостю (в тест-режиме chat_id чужой).
+            if not settings.test_chat_id:
+                db.set_client_max_chat(client_id, result.get("chatId"))
 
     if result.get("skipped"):
         log.info("✓  Сообщение собрано (%s), отправка пропущена: %s",
