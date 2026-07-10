@@ -182,7 +182,10 @@ async def gateway_incoming(request: Request) -> JSONResponse:
     if body.get("mediaUrl"):
         rec = await _save_incoming_media(str(body["mediaUrl"]), mtype)
         media = [rec] if rec else None
-    if not text and not media:
+    # Метку («📷 Фото» и т.п.) ставим всегда при пустом тексте — иначе превью в
+    # списке чатов у медиа-сообщений пустое (last_text берётся из text). Само
+    # медиа при этом на месте (media), в пузыре покажется картинкой + подписью.
+    if not text:
         text = _INCOMING_LABEL.get(mtype, "📎 Вложение")
 
     # incomingMessage — писал клиент; outgoingMessage — владелец ответил сам с телефона.
