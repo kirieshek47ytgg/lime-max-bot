@@ -236,6 +236,7 @@ async def send_message(client_id: int, body: SendBody, admin: dict = Depends(cur
 
     if delivered:
         db.set_client_no_max(client_id, False)
+        db.set_client_max_chat(client_id, result.get("chatId"))  # для матчинга входящих
 
     db.add_message(
         client_id, "manager", text, kind="manager", delivered=delivered,
@@ -280,6 +281,7 @@ async def send_files(
             if res.get("idMessage") and not res.get("skipped"):
                 delivered_any = True
                 gw_ids.append(str(res["idMessage"]))
+                db.set_client_max_chat(client_id, res.get("chatId"))  # для матчинга входящих
         except gateway.GatewayError as exc:
             await notify.record_alert("Отправка файла в MAX", str(exc))
             log.error("Отправка файла не удалась: %s", exc)
@@ -459,9 +461,12 @@ def export_orders(admin: dict = Depends(current_admin)) -> Response:
                 b["guests"] or "", b["amount"] or 0, b["created_at"],
             ]
         )
+    # UTF-8 BOM (﻿): без него Excel открывает CSV как Windows-1251 и кириллица
+    # превращается в кракозябры. С BOM Excel определяет UTF-8 сам. Импорт читает
+    # через utf-8-sig, поэтому BOM ему не мешает.
     return Response(
-        content=buf.getvalue(),
-        media_type="text/csv",
+        content=("﻿" + buf.getvalue()).encode("utf-8"),
+        media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": "attachment; filename=bookings.csv"},
     )
 
