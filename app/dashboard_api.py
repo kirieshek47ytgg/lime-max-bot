@@ -451,7 +451,9 @@ def export_orders(admin: dict = Depends(current_admin)) -> Response:
             """
         ).fetchall()
     buf = io.StringIO()
-    w = csv.writer(buf)
+    # Разделитель «;»: русский Excel по локали ждёт именно его — с запятой все
+    # колонки слипаются в одну ячейку. Импорт ниже определяет разделитель сам.
+    w = csv.writer(buf, delimiter=";")
     w.writerow(["id", "reserve_id", "client", "phone", "status", "place", "date", "time", "guests", "amount", "created_at"])
     for b in rows:
         w.writerow(
@@ -474,7 +476,11 @@ def export_orders(admin: dict = Depends(current_admin)) -> Response:
 @router.post("/orders/import")
 async def import_orders(file: UploadFile = File(...), admin: dict = Depends(current_admin)) -> dict:
     raw = (await file.read()).decode("utf-8-sig", errors="ignore")
-    reader = csv.DictReader(io.StringIO(raw))
+    # Разделитель определяем по заголовку: наш экспорт и рус. Excel дают «;»,
+    # старые/англ. файлы — «,». Берём тот, которого в первой строке больше.
+    first_line = raw.split("\n", 1)[0]
+    delim = ";" if first_line.count(";") >= first_line.count(",") else ","
+    reader = csv.DictReader(io.StringIO(raw), delimiter=delim)
     updated = skipped = 0
     with db.connect() as c:
         for r in reader:
