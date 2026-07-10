@@ -102,6 +102,11 @@ def clients(admin: dict = Depends(current_admin)) -> dict:
             """
         ).fetchall()
     for r in rows:
+        # Клиент без единого сообщения (отправка провалилась / все сообщения удалили)
+        # в диалогах не показываем — иначе висит «имя без переписки». Бронь при этом
+        # остаётся: заказы отдаёт отдельный эндпоинт /orders (таблица bookings).
+        if r["last_time"] is None:
+            continue
         resume_in = None
         if r["is_bot_paused"] and r["paused_until"]:
             try:
